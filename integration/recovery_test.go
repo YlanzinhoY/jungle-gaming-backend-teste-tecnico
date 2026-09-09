@@ -7,9 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
@@ -18,6 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"github.com/google/uuid"
+	"github.com/moby/moby/client"
 )
 
 func TestConsumerRedeliversAfterCommitBeforeDelete(t *testing.T) {
@@ -25,18 +23,12 @@ func TestConsumerRedeliversAfterCommitBeforeDelete(t *testing.T) {
 	sqsClient := newSQSClient(t)
 	pool := newPool(t)
 
-	compose(t, nil, "stop", "api-1", "api-2", "api-3")
+	replaceTestAPIs(t, 1, map[string]string{"SQS_CONSUMER_POST_COMMIT_DELAY": "15s"})
 	t.Cleanup(func() {
-		if err := composeCommand(nil, "up", "-d", "--force-recreate", "api-1", "api-2", "api-3"); err != nil {
-			t.Errorf("restore API instances: %v", err)
-			return
-		}
-		for _, apiURL := range apiURLs {
-			waitForAPI(t, apiURL)
+		if len(testEnvironment.apis) != 3 {
+			replaceTestAPIs(t, 3, nil)
 		}
 	})
-	compose(t, []string{"SQS_CONSUMER_POST_COMMIT_DELAY=15s"}, "up", "--build", "-d", "--force-recreate", "api-1")
-	waitForAPI(t, apiURLs[0])
 	time.Sleep(time.Second)
 
 	wallet := client.createWallet(t, "100.00")
@@ -55,7 +47,7 @@ func TestConsumerRedeliversAfterCommitBeforeDelete(t *testing.T) {
 		return completed, err
 	})
 
-	compose(t, nil, "kill", "api-1")
+	killTestAPI(t, 0)
 	receivedAgain := false
 	waitFor(t, 45*time.Second, func() (bool, error) {
 		output, err := sqsClient.ReceiveMessage(context.Background(), &sqs.ReceiveMessageInput{
@@ -90,10 +82,7 @@ func TestConsumerRedeliversAfterCommitBeforeDelete(t *testing.T) {
 		t.Fatal("message was not redelivered")
 	}
 
-	compose(t, nil, "up", "-d", "--force-recreate", "api-1", "api-2", "api-3")
-	for _, apiURL := range apiURLs {
-		waitForAPI(t, apiURL)
-	}
+	replaceTestAPIs(t, 3, nil)
 	waitFor(t, 20*time.Second, func() (bool, error) {
 		var count int
 		err := pool.QueryRow(
@@ -148,10 +137,7 @@ func TestRestartPreservesIdempotencyAndPendingReference(t *testing.T) {
 		t.Fatalf("pending refund = status %d, error %v, body %s", status, err, body)
 	}
 
-	compose(t, nil, "restart", "api-1", "api-2", "api-3")
-	for _, apiURL := range apiURLs {
-		waitForAPI(t, apiURL)
-	}
+	replaceTestAPIs(t, 3, nil)
 
 	status, body, err = request(
 		http.MethodPost,
@@ -240,29 +226,32 @@ func sendWagerMessage(t *testing.T, client *sqs.Client, currentWallet wallet, ex
 	}
 }
 
-func compose(t *testing.T, extraEnvironment []string, arguments ...string) {
+func replaceTestAPIs(t *testing.T, count int, overrides map[string]string) {
 	t.Helper()
-	if err := composeCommand(extraEnvironment, arguments...); err != nil {
-		t.Fatalf("docker compose %v: %v", arguments, err)
+	context, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if err := testEnvironment.replaceAPIs(context, count, overrides); err != nil {
+		t.Fatalf("replace Testcontainers APIs: %v", err)
 	}
 }
 
-func composeCommand(extraEnvironment []string, arguments ...string) error {
-	command := exec.Command("docker", append([]string{"compose"}, arguments...)...)
-	command.Dir = filepath.Join("..")
-	command.Env = append(os.Environ(), extraEnvironment...)
-	output, err := command.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%w: %s", err, output)
-	}
-	return nil
-}
-
-func waitForAPI(t *testing.T, apiURL string) {
+func killTestAPI(t *testing.T, index int) {
 	t.Helper()
-	waitFor(t, 60*time.Second, func() (bool, error) {
-		status, _, err := request(http.MethodGet, apiURL+"/health/ready", "", nil, nil)
-		return status == http.StatusOK, err
+	if index < 0 || index >= len(testEnvironment.apis) || testEnvironment.apis[index] == nil {
+		t.Fatalf("Testcontainers API %d is not running", index+1)
+	}
+	context, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if _, err := testEnvironment.imageClient.Client().ContainerKill(
+		context,
+		testEnvironment.apis[index].GetContainerID(),
+		client.ContainerKillOptions{Signal: "KILL"},
+	); err != nil {
+		t.Fatalf("kill Testcontainers API %d: %v", index+1, err)
+	}
+	waitFor(t, 10*time.Second, func() (bool, error) {
+		state, err := testEnvironment.apis[index].State(context)
+		return err == nil && !state.Running, err
 	})
 }
 

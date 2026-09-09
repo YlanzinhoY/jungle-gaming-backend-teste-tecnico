@@ -222,31 +222,6 @@ services:
     ports:
       - "${API_3_PORT:-8083}:8080"
 
-  test-race:
-    profiles: ["test"]
-    build:
-      context: .
-      dockerfile: Dockerfile.test
-    environment:
-      CGO_ENABLED: "1"
-      OTEL_TRACING_ENABLED: "false"
-      INTEGRATION_KEYCLOAK_URL: http://keycloak:8080
-      INTEGRATION_OIDC_ISSUER_URL: http://localhost:8081/realms/gaming
-      INTEGRATION_DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-wagering}?sslmode=disable
-      INTEGRATION_SQS_ENDPOINT: http://localstack:4566
-      INTEGRATION_API_URLS: http://api-1:8080,http://api-2:8080,http://api-3:8080
-    depends_on:
-      api-1:
-        condition: service_healthy
-      api-2:
-        condition: service_healthy
-      api-3:
-        condition: service_healthy
-    command: ["test", "-race", "-tags=integration", "./..."]
-    restart: "no"
-    networks:
-      - wagering
-
 volumes:
   postgres-data:
   pgadmin-data:

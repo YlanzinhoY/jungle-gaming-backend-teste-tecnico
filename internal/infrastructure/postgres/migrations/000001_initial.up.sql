@@ -1,3 +1,5 @@
+-- This migration owns schema only. It must never create domain records: the
+-- manual environment starts empty and E2E fixtures exist only in Testcontainers.
 CREATE TABLE IF NOT EXISTS wallets (
     id uuid PRIMARY KEY,
     player_id uuid NOT NULL,

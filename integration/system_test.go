@@ -38,16 +38,11 @@ import (
 )
 
 var (
-	keycloakURL = environment("INTEGRATION_KEYCLOAK_URL", "http://localhost:8081")
-	postgresURL = environment(
-		"INTEGRATION_DATABASE_URL",
-		"postgres://postgres:postgres@localhost:5432/wagering?sslmode=disable",
-	)
-	sqsEndpoint = environment("INTEGRATION_SQS_ENDPOINT", "http://localhost:4566")
-	apiURLs     = strings.Split(environment(
-		"INTEGRATION_API_URLS",
-		"http://localhost:8080,http://localhost:8082,http://localhost:8083",
-	), ",")
+	keycloakURL   string
+	oidcIssuerURL string
+	postgresURL   string
+	sqsEndpoint   string
+	apiURLs       []string
 )
 
 type testClient struct {
@@ -126,6 +121,12 @@ type expectedOutboundEvent struct {
 	DataFields    []string
 	DataValues    map[string]any
 	TimeDataField string
+}
+
+func TestTestcontainersDatabaseStartsWithoutDomainSeed(t *testing.T) {
+	if !testEnvironment.emptyDomainDatabase {
+		t.Fatal("Testcontainers did not start from an empty domain database")
+	}
 }
 
 func TestHealthMetricsAndAuthorization(t *testing.T) {
@@ -483,14 +484,12 @@ func TestOutboundEventsMatchDocumentedContract(t *testing.T) {
 func TestFxLifecycleAgainstRealDependencies(t *testing.T) {
 	t.Setenv("HTTP_ADDRESS", "127.0.0.1:0")
 	t.Setenv("DATABASE_URL", postgresURL)
-	t.Setenv(
-		"OIDC_ISSUER_URL",
-		environment("INTEGRATION_OIDC_ISSUER_URL", keycloakURL+"/realms/gaming"),
-	)
+	t.Setenv("OIDC_ISSUER_URL", oidcIssuerURL)
 	t.Setenv("OIDC_DISCOVERY_URL", keycloakURL+"/realms/gaming")
 	t.Setenv("AWS_ENDPOINT_URL", sqsEndpoint)
 	t.Setenv("WORKERS_ENABLED", "true")
 	t.Setenv("SQS_CONSUMER_CONCURRENCY", "1")
+	t.Setenv("OTEL_TRACING_ENABLED", "false")
 
 	app := fx.New(composition.Module(), fx.NopLogger)
 	startContext, cancelStart := context.WithTimeout(context.Background(), 20*time.Second)
@@ -975,6 +974,8 @@ func TestInvalidSQSMessageReachesDLQ(t *testing.T) {
 	sqsClient := newSQSClient(t)
 	inputURL := queueURL(t, sqsClient, "wager-transactions.fifo")
 	dlqURL := queueURL(t, sqsClient, "wager-transactions-dlq.fifo")
+	drainQueue(t, sqsClient, inputURL)
+	drainQueue(t, sqsClient, dlqURL)
 	marker := "invalid-" + uuid.NewString()
 	attributes, err := sqsClient.GetQueueAttributes(context.Background(), &sqs.GetQueueAttributesInput{
 		QueueUrl:       aws.String(inputURL),
@@ -998,7 +999,7 @@ func TestInvalidSQSMessageReachesDLQ(t *testing.T) {
 		t.Fatalf("SendMessage() error = %v", err)
 	}
 
-	waitFor(t, 30*time.Second, func() (bool, error) {
+	waitFor(t, 60*time.Second, func() (bool, error) {
 		output, err := sqsClient.ReceiveMessage(context.Background(), &sqs.ReceiveMessageInput{
 			QueueUrl:            aws.String(dlqURL),
 			MaxNumberOfMessages: 10,

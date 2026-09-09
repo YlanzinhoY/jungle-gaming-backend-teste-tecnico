@@ -12,6 +12,24 @@ O Compose executa o serviço `migrate` com `golang-migrate` antes de iniciar as
 APIs. Em um banco criado pela versão anterior, ele apenas acrescenta a coluna
 interna `dirty` na tabela de controle, preservando a versão já aplicada.
 
+## Banco manual sem seed
+
+As migrations versionadas criam somente schema: elas não inserem carteiras,
+transações, ledger, inbox ou outbox. Portanto, a primeira execução de
+`docker compose up --build -d` começa sem registros de domínio e o fluxo pode
+ser executado integralmente pelo Swagger ou pela API.
+
+Para descartar dados locais de uma execução manual anterior e voltar a esse
+estado vazio, pare o ambiente e remova **somente** seus volumes locais:
+
+```sh
+docker compose down -v
+docker compose up --build -d
+```
+
+Isso apaga os dados locais do Compose; não é necessário nem é usado pelos testes
+E2E.
+
 ## Acesso local pronto para uso
 
 Estes valores são intencionalmente públicos e existem somente para facilitar a
@@ -81,14 +99,29 @@ commit: o saldo persistido deve corresponder à soma do ledger e toda operação
 financeira `PROCESSED` precisa ter lançamento. Assim, uma escrita SQL direta de
 saldo sem o ledger é rejeitada pelo próprio PostgreSQL.
 
-## Testes com detector de corrida
+## E2E isolado com Testcontainers
 
-No Windows, o `-race` precisa de CGO e GCC. O serviço `test-race` fornece os dois
-em Linux e executa testes unitários e de integração contra PostgreSQL, Keycloak,
-LocalStack/SQS e as três APIs reais:
+Os testes com a tag `integration` não usam os serviços do Compose. O `TestMain`
+cria uma rede privada e efêmera com Testcontainers, PostgreSQL novo, LocalStack,
+Keycloak e três processos da API em containers independentes. Aplica as migrations
+em um banco de teste vazio e confere que não há dados de domínio antes do primeiro
+cenário. O único fixture é o realm do Keycloak, limitado aos clients OAuth usados
+nos testes. Ao fim da suíte, todos os containers, rede e imagem de teste são
+removidos automaticamente.
 
 ```sh
-docker compose --profile test run --rm test-race
+go test -count=1 -tags=integration ./integration -v
+```
+
+No Windows, execute o detector de corrida em Linux. O container abaixo é apenas
+o executor de testes: as dependências e as APIs continuam sendo criadas e
+encerradas pelo Testcontainers, sem iniciar o Compose.
+
+```sh
+docker build --no-cache -f Dockerfile.test -t jungle-gaming-e2e-test .
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+  -e TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal \
+  jungle-gaming-e2e-test test -count=1 -race -tags=integration ./...
 ```
 
 Além de concorrência e recuperação, a suíte cria uma transação real com o
@@ -101,14 +134,13 @@ Ela também simula um publisher interrompido depois de `SendMessage` e antes de
 confirmar a outbox: após a expiração do lease, outro publisher recupera o mesmo
 registro, preserva o `eventId` e confirma a publicação.
 
-O container usa a rede interna do Compose. Os endereços públicos continuam em
-`localhost`; por isso o teste usa os nomes internos dos serviços apenas durante
-sua execução.
+Os endereços usados pelo teste são resolvidos dinamicamente; nenhum endpoint,
+volume ou fila do ambiente manual é reutilizado.
 
 ## Cenários de recuperação que controlam containers
 
-Os dois cenários abaixo interrompem e recriam instâncias do próprio Compose. Eles
-devem ser executados pelo host, que tem acesso ao Docker Desktop:
+Os dois cenários abaixo interrompem e recriam containers de API do próprio
+Testcontainers. Eles não tocam no Compose:
 
 ```powershell
 go test -tags="integration hostrecovery" ./integration -run "TestConsumerRedeliversAfterCommitBeforeDelete|TestRestartPreservesIdempotencyAndPendingReference" -v -count=1

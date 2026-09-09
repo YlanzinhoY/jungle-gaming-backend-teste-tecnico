@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1.7
-
 # The race detector requires CGO and a C compiler. Keep this image separate
 # from the production image, which deliberately stays minimal and CGO-free.
 FROM golang:1.26-bookworm
@@ -13,7 +11,7 @@ WORKDIR /workspace
 ENV CGO_ENABLED=1
 
 COPY go.mod go.sum ./
-RUN --mount=type=cache,target=/go/pkg/mod go mod download
+RUN go mod download
 
 COPY . .
 

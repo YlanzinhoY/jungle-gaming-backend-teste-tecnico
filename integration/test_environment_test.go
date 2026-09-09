@@ -48,7 +48,10 @@ type e2eEnvironment struct {
 var testEnvironment *e2eEnvironment
 
 func TestMain(m *testing.M) {
-	startContext, cancelStart := context.WithTimeout(context.Background(), 5*time.Minute)
+	// A no-cache API image build can take longer than five minutes on a cold
+	// Docker host. Keep the E2E environment isolated while giving startup a
+	// realistic bounded deadline.
+	startContext, cancelStart := context.WithTimeout(context.Background(), 8*time.Minute)
 	environment, err := startE2EEnvironment(startContext)
 	cancelStart()
 	if err != nil {

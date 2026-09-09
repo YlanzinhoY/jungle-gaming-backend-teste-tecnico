@@ -1,4 +1,4 @@
-.env
+# `.env` is intentionally versioned with public local challenge values.
 .env.*
 !.env.example
 

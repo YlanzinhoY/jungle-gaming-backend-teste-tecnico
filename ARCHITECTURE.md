@@ -53,7 +53,7 @@ O schema reforça saldo não negativo, aritmética do ledger, unicidade de carte
 
 ## Guardas PL/pgSQL no PostgreSQL
 
-As migrations usam pequenas funções em **PL/pgSQL** para os triggers que não cabem em uma `CHECK`, FK ou índice único. É por isso que o GitHub identifica PLpgSQL no repositório: ele está restrito ao schema versionado em `internal/infrastructure/postgres/migrations`, enquanto a aplicação e as regras de orquestração continuam em Go.
+As migrations usam pequenas funções em **PL/pgSQL** para os triggers que não cabem em uma `CHECK`, FK ou índice único. Elas ficam restritas ao schema versionado em `internal/infrastructure/postgres/migrations`, enquanto a aplicação e as regras de orquestração continuam em Go.
 
 Esses guards formam uma segunda barreira de integridade para qualquer escritor do banco, inclusive outra instância da API ou uma operação SQL administrativa:
 

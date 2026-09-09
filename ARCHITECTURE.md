@@ -51,6 +51,19 @@ O lock consultivo serializa somente a mesma chave idempotente. Sua chave inteira
 
 O schema reforça saldo não negativo, aritmética do ledger, unicidade de carteira por jogador/moeda, transação externa e idempotência. O trigger `wallet_ledger_no_update` recusa `UPDATE` e `DELETE` no ledger. Outro guard permite inserir ledger apenas para transação `PROCESSED` com movimento, confere carteira, moeda, valor, saldo final e direção esperada; assim `LOSS`, `REJECTED` e `FAILED` não podem receber lançamento nem por escrita SQL direta. Triggers de restrição deferidos validam no commit que o saldo final da carteira é exatamente a soma de créditos menos débitos do ledger e que toda transação financeira `PROCESSED` possui seu lançamento; uma alteração direta de saldo ou uma transação processada sem ledger é rejeitada pelo PostgreSQL.
 
+## Guardas PL/pgSQL no PostgreSQL
+
+As migrations usam pequenas funções em **PL/pgSQL** para os triggers que não cabem em uma `CHECK`, FK ou índice único. É por isso que o GitHub identifica PLpgSQL no repositório: ele está restrito ao schema versionado em `internal/infrastructure/postgres/migrations`, enquanto a aplicação e as regras de orquestração continuam em Go.
+
+Esses guards formam uma segunda barreira de integridade para qualquer escritor do banco, inclusive outra instância da API ou uma operação SQL administrativa:
+
+- `prevent_ledger_mutation` mantém o ledger somente por inclusão;
+- `prevent_outbox_payload_mutation` preserva o snapshot imutável do evento publicado;
+- `enforce_wager_wallet_identity` confere carteira, jogador e moeda para transações ativas;
+- `enforce_ledger_transaction`, `enforce_wallet_balance_ledger_consistency` e `enforce_processed_transaction_ledger` validam a relação entre transação, lançamento e saldo no commit.
+
+PL/pgSQL não decide fluxo HTTP, autenticação, idempotência ou regra de produto. Essas decisões pertencem ao domínio e à camada de aplicação em Go. Os triggers apenas recusam um estado persistido que já seria inválido pelas invariantes do serviço. As migrations e os E2E exercitam esses limites diretamente, inclusive constraints, imutabilidade do ledger, concorrência e reconciliação.
+
 ## Idempotência
 
 O hash SHA-256 usa um JSON canônico montado como mapa de strings; `encoding/json` ordena suas chaves lexicograficamente. Os campos são provedor, ID externo, jogador, carteira, rodada, jogo, tipo, valor normalizado, moeda e referência. O header de idempotência e metadados HTTP/SQS não entram no hash. HTTP e SQS constroem exatamente o mesmo comando.

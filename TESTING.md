@@ -97,6 +97,9 @@ consultá-la nem reexecutá-la. A rejeição não cria nova transação nem alte
 carteira ou ledger; o replay pelo provider B continua idempotente. O lifecycle
 Fx é iniciado com os workers reais antes de realizar o shutdown. Também confirma
 que o client OAuth `provider-c` é aceito pela API com seu claim de provider.
+Ela também simula um publisher interrompido depois de `SendMessage` e antes de
+confirmar a outbox: após a expiração do lease, outro publisher recupera o mesmo
+registro, preserva o `eventId` e confirma a publicação.
 
 O container usa a rede interna do Compose. Os endereços públicos continuam em
 `localhost`; por isso o teste usa os nomes internos dos serviços apenas durante

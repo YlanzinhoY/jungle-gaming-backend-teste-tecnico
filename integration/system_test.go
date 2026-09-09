@@ -1008,11 +1008,14 @@ func TestInvalidSQSMessageReachesDLQ(t *testing.T) {
 			return false, err
 		}
 		for _, message := range output.Messages {
-			if aws.ToString(message.Body) == marker {
-				_, _ = sqsClient.DeleteMessage(context.Background(), &sqs.DeleteMessageInput{
-					QueueUrl:      aws.String(dlqURL),
-					ReceiptHandle: message.ReceiptHandle,
-				})
+			matchesMarker := aws.ToString(message.Body) == marker
+			if _, err := sqsClient.DeleteMessage(context.Background(), &sqs.DeleteMessageInput{
+				QueueUrl:      aws.String(dlqURL),
+				ReceiptHandle: message.ReceiptHandle,
+			}); err != nil {
+				return false, err
+			}
+			if matchesMarker {
 				return true, nil
 			}
 		}
@@ -1170,6 +1173,158 @@ func TestTwoPublishersClaimEachOutboxEventOnce(t *testing.T) {
 	if len(claimedBy) != 20 {
 		t.Fatalf("claimed probe events = %d, want 20", len(claimedBy))
 	}
+}
+
+func TestOutboxRecoversAfterPublishBeforeConfirmation(t *testing.T) {
+	sqsClient := newSQSClient(t)
+	eventQueueURL := queueURL(t, sqsClient, "wager-events.fifo")
+	drainQueue(t, sqsClient, eventQueueURL)
+
+	pool := newPool(t)
+	eventID := uuid.NewString()
+	transactionID := uuid.NewString()
+	walletID := uuid.NewString()
+	marker := "publish-before-confirmation-" + uuid.NewString()
+	now := time.Now().UTC()
+	payload, err := json.Marshal(map[string]any{
+		"eventId":       eventID,
+		"eventType":     "WagerTransactionProcessed",
+		"aggregateId":   transactionID,
+		"correlationId": marker,
+		"occurredAt":    now.Format(time.RFC3339Nano),
+		"version":       1,
+		"data": map[string]any{
+			"transactionId":         transactionID,
+			"externalTransactionId": "recovery-" + uuid.NewString(),
+			"providerId":            "provider-a",
+			"walletId":              walletID,
+			"playerId":              uuid.NewString(),
+			"roundId":               "round-" + uuid.NewString(),
+			"gameId":                "outbox-recovery-probe",
+			"kind":                  "BET",
+			"money":                 map[string]string{"amount": "1.00", "currency": "BRL"},
+			"status":                "PROCESSED",
+			"balance":               map[string]string{"amount": "99.00", "currency": "BRL"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal outbox recovery event: %v", err)
+	}
+
+	// The locked row is the durable state left by a publisher that has already
+	// claimed the event. It is deliberately inserted with a live lease so one of
+	// the running publishers cannot claim it before the simulated interruption.
+	if _, err := pool.Exec(
+		context.Background(),
+		`INSERT INTO outbox_events(
+			event_id, aggregate_id, event_type, payload, occurred_at, next_attempt_at, locked_by, locked_until
+		) VALUES ($1,$2,$3,$4::jsonb,$5,$5,$6,$7)`,
+		eventID,
+		transactionID,
+		"WagerTransactionProcessed",
+		string(payload),
+		now,
+		"interrupted-publisher",
+		now.Add(time.Hour),
+	); err != nil {
+		t.Fatalf("insert claimed outbox event: %v", err)
+	}
+
+	// This is the exact durable failure window: SendMessage succeeded, but the
+	// process terminates before MarkOutboxPublished can commit.
+	if _, err := sqsClient.SendMessage(context.Background(), &sqs.SendMessageInput{
+		QueueUrl:               aws.String(eventQueueURL),
+		MessageBody:            aws.String(string(payload)),
+		MessageGroupId:         aws.String(transactionID),
+		MessageDeduplicationId: aws.String(eventID),
+	}); err != nil {
+		t.Fatalf("first outbox publish: %v", err)
+	}
+	var unpublished bool
+	if err := pool.QueryRow(
+		context.Background(),
+		`SELECT published_at IS NULL FROM outbox_events WHERE event_id=$1`,
+		eventID,
+	).Scan(&unpublished); err != nil {
+		t.Fatalf("read unconfirmed outbox event: %v", err)
+	}
+	if !unpublished {
+		t.Fatal("outbox event was confirmed before the simulated interruption")
+	}
+
+	// Ending the lease models the publisher process disappearing. A normal
+	// publisher must reclaim the same row, retry SendMessage with the same event
+	// ID and confirm it; FIFO deduplication may collapse the duplicate delivery.
+	leaseRelease, err := pool.Exec(
+		context.Background(),
+		`UPDATE outbox_events SET locked_until=now()-interval '1 second'
+		 WHERE event_id=$1 AND locked_by='interrupted-publisher' AND published_at IS NULL`,
+		eventID,
+	)
+	if err != nil {
+		t.Fatalf("expire interrupted publisher lease: %v", err)
+	}
+	if leaseRelease.RowsAffected() != 1 {
+		t.Fatalf("expired outbox leases = %d, want 1", leaseRelease.RowsAffected())
+	}
+
+	waitFor(t, 20*time.Second, func() (bool, error) {
+		var published bool
+		var storedPayload []byte
+		err := pool.QueryRow(
+			context.Background(),
+			`SELECT published_at IS NOT NULL, payload FROM outbox_events WHERE event_id=$1`,
+			eventID,
+		).Scan(&published, &storedPayload)
+		if err != nil || !published {
+			return false, err
+		}
+		var stored, original any
+		if err := json.Unmarshal(storedPayload, &stored); err != nil {
+			return false, err
+		}
+		if err := json.Unmarshal(payload, &original); err != nil {
+			return false, err
+		}
+		if !reflect.DeepEqual(stored, original) {
+			return false, fmt.Errorf("recovered outbox payload changed")
+		}
+		return true, nil
+	})
+
+	waitFor(t, 20*time.Second, func() (bool, error) {
+		output, err := sqsClient.ReceiveMessage(context.Background(), &sqs.ReceiveMessageInput{
+			QueueUrl:                    aws.String(eventQueueURL),
+			MaxNumberOfMessages:         10,
+			WaitTimeSeconds:             1,
+			MessageSystemAttributeNames: []types.MessageSystemAttributeName{types.MessageSystemAttributeNameAll},
+		})
+		if err != nil {
+			return false, err
+		}
+		for _, message := range output.Messages {
+			if _, err := sqsClient.DeleteMessage(context.Background(), &sqs.DeleteMessageInput{
+				QueueUrl:      aws.String(eventQueueURL),
+				ReceiptHandle: message.ReceiptHandle,
+			}); err != nil {
+				return false, err
+			}
+			var envelope outboundEventEnvelope
+			if err := json.Unmarshal([]byte(aws.ToString(message.Body)), &envelope); err != nil {
+				continue
+			}
+			if envelope.EventID != eventID {
+				continue
+			}
+			if envelope.EventType != "WagerTransactionProcessed" || envelope.AggregateID != transactionID ||
+				message.Attributes["MessageGroupId"] != transactionID ||
+				message.Attributes["MessageDeduplicationId"] != eventID {
+				return false, fmt.Errorf("recovered SQS event does not preserve routing identity")
+			}
+			return true, nil
+		}
+		return false, nil
+	})
 }
 
 func newTestClient(t *testing.T) testClient {

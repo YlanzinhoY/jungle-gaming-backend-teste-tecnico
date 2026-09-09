@@ -1,0 +1,21 @@
+# syntax=docker/dockerfile:1.7
+
+# The race detector requires CGO and a C compiler. Keep this image separate
+# from the production image, which deliberately stays minimal and CGO-free.
+FROM golang:1.26-bookworm
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends build-essential ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+
+ENV CGO_ENABLED=1
+
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
+
+COPY . .
+
+ENTRYPOINT ["go"]
+CMD ["test", "-race", "./..."]

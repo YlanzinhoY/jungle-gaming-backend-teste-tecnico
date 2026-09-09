@@ -1,0 +1,258 @@
+name: jungle-gaming
+
+x-api-environment: &api-environment
+  HTTP_ADDRESS: :8080
+  HTTP_READ_TIMEOUT: 10s
+  HTTP_WRITE_TIMEOUT: 20s
+  HTTP_SHUTDOWN_TIMEOUT: 15s
+  DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-wagering}?sslmode=disable
+  DATABASE_MAX_CONNECTIONS: 12
+  OIDC_ISSUER_URL: http://localhost:8081/realms/gaming
+  OIDC_DISCOVERY_URL: http://keycloak:8080/realms/gaming
+  OIDC_AUDIENCE: wagering-api
+  OIDC_PROVIDER_CLAIM: provider_id
+  OIDC_INTERNAL_ROLE: wallet-service
+  OIDC_STARTUP_TIMEOUT: 30s
+  AWS_REGION: us-east-1
+  AWS_ENDPOINT_URL: http://localstack:4566
+  AWS_ACCESS_KEY_ID: test
+  AWS_SECRET_ACCESS_KEY: test
+  SQS_INPUT_QUEUE: wager-transactions.fifo
+  SQS_INPUT_DLQ: wager-transactions-dlq.fifo
+  SQS_EVENT_QUEUE: wager-events.fifo
+  SQS_EVENT_DLQ: wager-events-dlq.fifo
+  SQS_CREATE_QUEUES: "true"
+  SQS_MAX_RECEIVES: 5
+  SQS_VISIBILITY_TIMEOUT_SECONDS: 30
+  SQS_RETRY_BASE_BACKOFF: 2s
+  SQS_RETRY_MAX_BACKOFF: 2m
+  SQS_CONSUMER_POST_COMMIT_DELAY: ${SQS_CONSUMER_POST_COMMIT_DELAY:-0s}
+  WORKERS_ENABLED: "true"
+  SQS_CONSUMER_CONCURRENCY: 2
+  OUTBOX_BATCH_SIZE: 50
+  REFERENCE_BATCH_SIZE: 50
+  REFERENCE_MAX_ATTEMPTS: 10
+  REFERENCE_BASE_BACKOFF: 2s
+  REFERENCE_MAX_BACKOFF: 5m
+  OUTBOX_LEASE: 30s
+  WORKER_POLL_INTERVAL: 1s
+  OTEL_TRACING_ENABLED: "true"
+  OTEL_SERVICE_NAME: jungle-gaming-api
+  OTEL_SERVICE_VERSION: local
+  OTEL_DEPLOYMENT_ENVIRONMENT: local
+  OTEL_EXPORTER_OTLP_ENDPOINT: jaeger:4317
+  OTEL_EXPORTER_OTLP_INSECURE: "true"
+  OTEL_TRACES_SAMPLE_RATIO: 1
+
+x-api-service: &api-service
+  image: jungle-gaming:local
+  pull_policy: never
+  init: true
+  environment: *api-environment
+  depends_on:
+    postgres:
+      condition: service_healthy
+    migrate:
+      condition: service_completed_successfully
+    keycloak:
+      condition: service_healthy
+    localstack:
+      condition: service_healthy
+    jaeger:
+      condition: service_started
+  restart: on-failure:5
+  stop_grace_period: 20s
+  networks:
+    - wagering
+
+services:
+  postgres:
+    image: postgres:17.11-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-wagering}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+    restart: unless-stopped
+    networks:
+      - wagering
+
+  pgadmin:
+    image: dpage/pgadmin4:9.17
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-admin@jungle.dev}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD:-admin-local}
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+    ports:
+      - "${PGADMIN_PORT:-5050}:80"
+    volumes:
+      - pgadmin-data:/var/lib/pgadmin
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - wagering
+
+  keycloak-db:
+    image: postgres:17.11-alpine
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: ${KEYCLOAK_DB_PASSWORD:-keycloak-local}
+    volumes:
+      - keycloak-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keycloak -d keycloak"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+    restart: unless-stopped
+    networks:
+      - wagering
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.7.3
+    command: start-dev --import-realm
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://keycloak-db:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:-keycloak-local}
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USERNAME:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin-local}
+      KC_HEALTH_ENABLED: "true"
+      KC_HTTP_ENABLED: "true"
+      KC_HOSTNAME: http://localhost:8081
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      KC_HOSTNAME_STRICT: "false"
+    ports:
+      - "${KEYCLOAK_PORT:-8081}:8080"
+    volumes:
+      - ./docs/keycloak-realm.json:/opt/keycloak/data/import/gaming-realm.json:ro
+    depends_on:
+      keycloak-db:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - /bin/bash
+        - -ec
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/9000;
+          printf 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3;
+          grep -q 'HTTP/1.1 200 OK' <&3
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 20
+    restart: unless-stopped
+    networks:
+      - wagering
+
+  localstack:
+    image: localstack/localstack:4.8.1
+    environment:
+      SERVICES: sqs
+      AWS_DEFAULT_REGION: us-east-1
+      PERSISTENCE: "1"
+      DEBUG: "0"
+    ports:
+      - "${LOCALSTACK_PORT:-4566}:4566"
+    volumes:
+      - localstack-data:/var/lib/localstack
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:4566/_localstack/health | grep -q '\"sqs\"'"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+    networks:
+      - wagering
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "${JAEGER_UI_PORT:-16686}:16686"
+      - "${OTEL_GRPC_PORT:-4317}:4317"
+    restart: unless-stopped
+    networks:
+      - wagering
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile.migrate
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-wagering}?sslmode=disable
+    volumes:
+      - ./internal/infrastructure/postgres/migrations:/migrations:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - wagering
+
+  api-1:
+    <<: *api-service
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "${API_PORT:-8080}:8080"
+
+  api-2:
+    <<: *api-service
+    ports:
+      - "${API_2_PORT:-8082}:8080"
+
+  api-3:
+    <<: *api-service
+    ports:
+      - "${API_3_PORT:-8083}:8080"
+
+  test-race:
+    profiles: ["test"]
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    environment:
+      CGO_ENABLED: "1"
+      OTEL_TRACING_ENABLED: "false"
+      INTEGRATION_KEYCLOAK_URL: http://keycloak:8080
+      INTEGRATION_OIDC_ISSUER_URL: http://localhost:8081/realms/gaming
+      INTEGRATION_DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-wagering}?sslmode=disable
+      INTEGRATION_SQS_ENDPOINT: http://localstack:4566
+      INTEGRATION_API_URLS: http://api-1:8080,http://api-2:8080,http://api-3:8080
+    depends_on:
+      api-1:
+        condition: service_healthy
+      api-2:
+        condition: service_healthy
+      api-3:
+        condition: service_healthy
+    command: ["test", "-race", "-tags=integration", "./..."]
+    restart: "no"
+    networks:
+      - wagering
+
+volumes:
+  postgres-data:
+  pgadmin-data:
+  keycloak-data:
+  localstack-data:
+
+networks:
+  wagering:
+    driver: bridge

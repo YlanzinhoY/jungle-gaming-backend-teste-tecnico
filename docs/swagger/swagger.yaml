@@ -1,0 +1,627 @@
+basePath: /
+definitions:
+  application.LedgerEntryView:
+    properties:
+      balanceAfter:
+        $ref: '#/definitions/application.MoneyView'
+      balanceBefore:
+        $ref: '#/definitions/application.MoneyView'
+      createdAt:
+        type: string
+      direction:
+        $ref: '#/definitions/domain.LedgerDirection'
+      id:
+        type: string
+      money:
+        $ref: '#/definitions/application.MoneyView'
+      transactionId:
+        type: string
+    type: object
+  application.LedgerPage:
+    properties:
+      items:
+        items:
+          $ref: '#/definitions/application.LedgerEntryView'
+        type: array
+      nextCursor:
+        type: string
+    type: object
+  application.MoneyView:
+    properties:
+      amount:
+        type: string
+      currency:
+        type: string
+    type: object
+  application.ProcessWagerResult:
+    properties:
+      balance:
+        $ref: '#/definitions/application.MoneyView'
+      failureCode:
+        type: string
+      idempotentReplay:
+        type: boolean
+      status:
+        $ref: '#/definitions/domain.TransactionStatus'
+      transactionId:
+        type: string
+    type: object
+  application.ReconciliationView:
+    properties:
+      calculatedBalance:
+        $ref: '#/definitions/application.MoneyView'
+      checkedEntries:
+        type: integer
+      consistent:
+        type: boolean
+      difference:
+        $ref: '#/definitions/application.MoneyView'
+      storedBalance:
+        $ref: '#/definitions/application.MoneyView'
+      walletId:
+        type: string
+    type: object
+  application.TransactionView:
+    properties:
+      attemptCount:
+        type: integer
+      createdAt:
+        type: string
+      externalTransactionId:
+        type: string
+      failureCode:
+        type: string
+      gameId:
+        type: string
+      id:
+        type: string
+      kind:
+        $ref: '#/definitions/domain.TransactionKind'
+      money:
+        $ref: '#/definitions/application.MoneyView'
+      nextAttemptAt:
+        type: string
+      playerId:
+        type: string
+      providerId:
+        type: string
+      referenceExternalTransactionId:
+        type: string
+      referenceTransactionId:
+        type: string
+      resultBalance:
+        $ref: '#/definitions/application.MoneyView'
+      roundId:
+        type: string
+      status:
+        $ref: '#/definitions/domain.TransactionStatus'
+      updatedAt:
+        type: string
+      walletId:
+        type: string
+    type: object
+  application.WalletView:
+    properties:
+      balance:
+        $ref: '#/definitions/application.MoneyView'
+      createdAt:
+        type: string
+      id:
+        type: string
+      playerId:
+        type: string
+      updatedAt:
+        type: string
+      version:
+        type: integer
+    type: object
+  domain.LedgerDirection:
+    enum:
+    - DEBIT
+    - CREDIT
+    type: string
+    x-enum-varnames:
+    - DirectionDebit
+    - DirectionCredit
+  domain.TransactionKind:
+    enum:
+    - OPENING
+    - BET
+    - WIN
+    - LOSS
+    - REFUND
+    - ROLLBACK
+    type: string
+    x-enum-varnames:
+    - KindOpening
+    - KindBet
+    - KindWin
+    - KindLoss
+    - KindRefund
+    - KindRollback
+  domain.TransactionStatus:
+    enum:
+    - PENDING
+    - PENDING_REFERENCE
+    - PROCESSED
+    - REJECTED
+    - FAILED
+    type: string
+    x-enum-varnames:
+    - StatusPending
+    - StatusPendingReference
+    - StatusProcessed
+    - StatusRejected
+    - StatusFailed
+  httpapi.CreateWalletRequest:
+    properties:
+      initialBalance:
+        $ref: '#/definitions/httpapi.MoneyRequest'
+      playerId:
+        example: 0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1
+        type: string
+    required:
+    - initialBalance
+    - playerId
+    type: object
+  httpapi.HealthCheck:
+    properties:
+      latencyMs:
+        example: 4
+        type: integer
+      message:
+        example: dependency unavailable
+        type: string
+      status:
+        example: up
+        type: string
+    type: object
+  httpapi.HealthResponse:
+    properties:
+      checkedAt:
+        format: date-time
+        type: string
+      checks:
+        additionalProperties:
+          $ref: '#/definitions/httpapi.HealthCheck'
+        type: object
+      status:
+        example: ready
+        type: string
+    type: object
+  httpapi.MoneyRequest:
+    properties:
+      amount:
+        example: "25.00"
+        type: string
+      currency:
+        example: BRL
+        type: string
+    required:
+    - amount
+    - currency
+    type: object
+  httpapi.ProblemDetail:
+    properties:
+      code:
+        example: INVALID_REQUEST
+        type: string
+      message:
+        example: request is invalid
+        type: string
+    type: object
+  httpapi.ProblemResponse:
+    properties:
+      error:
+        $ref: '#/definitions/httpapi.ProblemDetail'
+    type: object
+  httpapi.WagerRequest:
+    properties:
+      externalTransactionId:
+        example: transaction-123
+        maxLength: 256
+        type: string
+      gameId:
+        example: fortune-chimp
+        maxLength: 256
+        type: string
+      kind:
+        enum:
+        - BET
+        - WIN
+        - LOSS
+        - REFUND
+        - ROLLBACK
+        type: string
+      money:
+        $ref: '#/definitions/httpapi.MoneyRequest'
+      playerId:
+        example: 0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1
+        type: string
+      providerId:
+        example: provider-a
+        maxLength: 128
+        type: string
+      referenceExternalTransactionId:
+        maxLength: 256
+        type: string
+      roundId:
+        example: round-987
+        maxLength: 256
+        type: string
+      walletId:
+        example: 0192f291-27dd-7d3f-8071-5f8685deef37
+        type: string
+    required:
+    - kind
+    - money
+    - playerId
+    - walletId
+    type: object
+host: localhost:8080
+info:
+  contact: {}
+  description: API for wallets and distributed, idempotent wager processing.
+  title: Distributed Wagering API
+  version: 1.0.0
+paths:
+  /health/live:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/httpapi.HealthResponse'
+      summary: Process liveness
+      tags:
+      - Health
+  /health/ready:
+    get:
+      description: Checks PostgreSQL, the SQS input and event queues, and OIDC discovery
+        in parallel.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/httpapi.HealthResponse'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/httpapi.HealthResponse'
+      summary: Detailed dependency readiness
+      tags:
+      - Health
+  /providers/{providerId}/wagering/transactions/{externalTransactionId}:
+    get:
+      description: A provider can query only its own transactions.
+      parameters:
+      - description: Provider ID
+        in: path
+        name: providerId
+        required: true
+        type: string
+      - description: External transaction ID
+        in: path
+        name: externalTransactionId
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/application.TransactionView'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/httpapi.ProblemResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/httpapi.ProblemResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/httpapi.ProblemResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/httpapi.ProblemResponse'
+      security:
+      - ProviderOAuth: []
+      summary: Get an external transaction
+      tags:
+      - Wagering
+  /wagering/transactions:
+    post:
+      consumes:
+      - application/json
+      description: providerId must match the token provider_id claim. HTTP and SQS
+        share the same idempotent use case.
+      parameters:
+      - description: Idempotency key
+        in: header
+        name: Idempotency-Key
+        required: true
+        type: string
+      - description: Correlation ID
+        in: header
+        name: X-Correlation-ID
+        type: string
+      - description: Transaction
+        in: body
+        name: payload
+        required: true
+        schema:
+          $ref: '#/definitions/httpapi.WagerRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/application.ProcessWagerResult'
+        "202":
+          description: Pending reference
+          schema:
+            $ref: '#/definitions/application.ProcessWagerResult'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/httpapi.ProblemResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/httpapi.ProblemResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/httpapi.ProblemResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/httpapi.ProblemResponse'
+        "422":
+          description: Auditable business rejection
+          schema:
+            $ref: '#/definitions/application.ProcessWagerResult'
+        "500":
+          description: Auditable terminal technical failure
+          schema:
+            $ref: '#/definitions/application.ProcessWagerResult'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/httpapi.ProblemResponse'
+      security:
+      - ProviderOAuth: []
+      summary: Process a wager transaction
+      tags:
+      - Wagering
+  /wagering/transactions/{transactionId}:
+    get:
+      description: Requires the internal wallet-service role.
+      parameters:
+      - description: Transaction ID
+        format: uuid
+        in: path
+        name: transactionId
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/application.TransactionView'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/httpapi.ProblemResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/httpapi.ProblemResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/httpapi.ProblemResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/httpapi.ProblemResponse'
+      security:
+      - InternalOAuth: []
+      summary: Get a transaction by internal ID
+      tags:
+      - Wagering
+  /wallets:
+    post:
+      consumes:
+      - application/json
+      description: Creates a wallet; requires the internal wallet-service role.
+      parameters:
+      - description: Wallet
+        in: body
+        name: payload
+        required: true
+        schema:
+          $ref: '#/definitions/httpapi.CreateWalletRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/application.WalletView'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/httpapi.ProblemResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/httpapi.ProblemResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/httpapi.ProblemResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/httpapi.ProblemResponse'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/httpapi.ProblemResponse'
+      security:
+      - InternalOAuth: []
+      summary: Open a wallet
+      tags:
+      - Wallets
+  /wallets/{walletId}:
+    get:
+      description: Requires the internal wallet-service role.
+      parameters:
+      - description: Wallet ID
+        format: uuid
+        in: path
+        name: walletId
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/application.WalletView'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/httpapi.ProblemResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/httpapi.ProblemResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/httpapi.ProblemResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/httpapi.ProblemResponse'
+      security:
+      - InternalOAuth: []
+      summary: Get a wallet
+      tags:
+      - Wallets
+  /wallets/{walletId}/ledger:
+    get:
+      description: Uses an opaque cursor and stable ordering; requires the internal
+        role.
+      parameters:
+      - description: Wallet ID
+        format: uuid
+        in: path
+        name: walletId
+        required: true
+        type: string
+      - description: Opaque cursor
+        in: query
+        name: cursor
+        type: string
+      - default: 50
+        description: Number of items (1-100)
+        in: query
+        maximum: 100
+        minimum: 1
+        name: limit
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/application.LedgerPage'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/httpapi.ProblemResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/httpapi.ProblemResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/httpapi.ProblemResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/httpapi.ProblemResponse'
+      security:
+      - InternalOAuth: []
+      summary: List a wallet ledger
+      tags:
+      - Wallets
+  /wallets/{walletId}/reconciliation:
+    post:
+      description: Does not change the balance; requires the internal role.
+      parameters:
+      - description: Wallet ID
+        format: uuid
+        in: path
+        name: walletId
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/application.ReconciliationView'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/httpapi.ProblemResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/httpapi.ProblemResponse'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/httpapi.ProblemResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/httpapi.ProblemResponse'
+      security:
+      - InternalOAuth: []
+      summary: Reconcile wallet and ledger
+      tags:
+      - Wallets
+schemes:
+- http
+securityDefinitions:
+  InternalOAuth:
+    authorizationUrl: http://localhost:8081/realms/gaming/protocol/openid-connect/auth
+    flow: accessCode
+    tokenUrl: http://localhost:8081/realms/gaming/protocol/openid-connect/token
+    type: oauth2
+  ProviderOAuth:
+    authorizationUrl: http://localhost:8081/realms/gaming/protocol/openid-connect/auth
+    flow: accessCode
+    tokenUrl: http://localhost:8081/realms/gaming/protocol/openid-connect/token
+    type: oauth2
+swagger: "2.0"

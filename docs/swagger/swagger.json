@@ -1,0 +1,931 @@
+{
+    "schemes": [
+        "http"
+    ],
+    "swagger": "2.0",
+    "info": {
+        "description": "API for wallets and distributed, idempotent wager processing.",
+        "title": "Distributed Wagering API",
+        "contact": {},
+        "version": "1.0.0"
+    },
+    "host": "localhost:8080",
+    "basePath": "/",
+    "paths": {
+        "/health/live": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Health"
+                ],
+                "summary": "Process liveness",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.HealthResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/health/ready": {
+            "get": {
+                "description": "Checks PostgreSQL, the SQS input and event queues, and OIDC discovery in parallel.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Health"
+                ],
+                "summary": "Detailed dependency readiness",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.HealthResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.HealthResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/providers/{providerId}/wagering/transactions/{externalTransactionId}": {
+            "get": {
+                "security": [
+                    {
+                        "ProviderOAuth": []
+                    }
+                ],
+                "description": "A provider can query only its own transactions.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Wagering"
+                ],
+                "summary": "Get an external transaction",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Provider ID",
+                        "name": "providerId",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "External transaction ID",
+                        "name": "externalTransactionId",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/application.TransactionView"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ProblemResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ProblemResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ProblemResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ProblemResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/wagering/transactions": {
+            "post": {
+                "security": [
+                    {
+                        "ProviderOAuth": []
+                    }
+                ],
+                "description": "providerId must match the token provider_id claim. HTTP and SQS share the same idempotent use case.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Wagering"
+                ],
+                "summary": "Process a wager transaction",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Idempotency key",
+                        "name": "Idempotency-Key",
+                        "in": "header",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Correlation ID",
+                        "name": "X-Correlation-ID",
+                        "in": "header"
+                    },
+                    {
+                        "description": "Transaction",
+                        "name": "payload",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.WagerRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/application.ProcessWagerResult"
+                        }
+                    },
+                    "202": {
+                        "description": "Pending reference",
+                        "schema": {
+                            "$ref": "#/definitions/application.ProcessWagerResult"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ProblemResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ProblemResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ProblemResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ProblemResponse"
+                        }
+                    },
+                    "422": {
+                        "description": "Auditable business rejection",
+                        "schema": {
+                            "$ref": "#/definitions/application.ProcessWagerResult"
+                        }
+                    },
+                    "500": {
+                        "description": "Auditable terminal technical failure",
+                        "schema": {
+                            "$ref": "#/definitions/application.ProcessWagerResult"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ProblemResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/wagering/transactions/{transactionId}": {
+            "get": {
+                "security": [
+                    {
+                        "InternalOAuth": []
+                    }
+                ],
+                "description": "Requires the internal wallet-service role.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Wagering"
+                ],
+                "summary": "Get a transaction by internal ID",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Transaction ID",
+                        "name": "transactionId",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/application.TransactionView"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ProblemResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ProblemResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ProblemResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ProblemResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/wallets": {
+            "post": {
+                "security": [
+                    {
+                        "InternalOAuth": []
+                    }
+                ],
+                "description": "Creates a wallet; requires the internal wallet-service role.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Wallets"
+                ],
+                "summary": "Open a wallet",
+                "parameters": [
+                    {
+                        "description": "Wallet",
+                        "name": "payload",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.CreateWalletRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/application.WalletView"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ProblemResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ProblemResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ProblemResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ProblemResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ProblemResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/wallets/{walletId}": {
+            "get": {
+                "security": [
+                    {
+                        "InternalOAuth": []
+                    }
+                ],
+                "description": "Requires the internal wallet-service role.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Wallets"
+                ],
+                "summary": "Get a wallet",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Wallet ID",
+                        "name": "walletId",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/application.WalletView"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ProblemResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ProblemResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ProblemResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ProblemResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/wallets/{walletId}/ledger": {
+            "get": {
+                "security": [
+                    {
+                        "InternalOAuth": []
+                    }
+                ],
+                "description": "Uses an opaque cursor and stable ordering; requires the internal role.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Wallets"
+                ],
+                "summary": "List a wallet ledger",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Wallet ID",
+                        "name": "walletId",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Opaque cursor",
+                        "name": "cursor",
+                        "in": "query"
+                    },
+                    {
+                        "maximum": 100,
+                        "minimum": 1,
+                        "type": "integer",
+                        "default": 50,
+                        "description": "Number of items (1-100)",
+                        "name": "limit",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/application.LedgerPage"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ProblemResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ProblemResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ProblemResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ProblemResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/wallets/{walletId}/reconciliation": {
+            "post": {
+                "security": [
+                    {
+                        "InternalOAuth": []
+                    }
+                ],
+                "description": "Does not change the balance; requires the internal role.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Wallets"
+                ],
+                "summary": "Reconcile wallet and ledger",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Wallet ID",
+                        "name": "walletId",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/application.ReconciliationView"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ProblemResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ProblemResponse"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ProblemResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ProblemResponse"
+                        }
+                    }
+                }
+            }
+        }
+    },
+    "definitions": {
+        "application.LedgerEntryView": {
+            "type": "object",
+            "properties": {
+                "balanceAfter": {
+                    "$ref": "#/definitions/application.MoneyView"
+                },
+                "balanceBefore": {
+                    "$ref": "#/definitions/application.MoneyView"
+                },
+                "createdAt": {
+                    "type": "string"
+                },
+                "direction": {
+                    "$ref": "#/definitions/domain.LedgerDirection"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "money": {
+                    "$ref": "#/definitions/application.MoneyView"
+                },
+                "transactionId": {
+                    "type": "string"
+                }
+            }
+        },
+        "application.LedgerPage": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/application.LedgerEntryView"
+                    }
+                },
+                "nextCursor": {
+                    "type": "string"
+                }
+            }
+        },
+        "application.MoneyView": {
+            "type": "object",
+            "properties": {
+                "amount": {
+                    "type": "string"
+                },
+                "currency": {
+                    "type": "string"
+                }
+            }
+        },
+        "application.ProcessWagerResult": {
+            "type": "object",
+            "properties": {
+                "balance": {
+                    "$ref": "#/definitions/application.MoneyView"
+                },
+                "failureCode": {
+                    "type": "string"
+                },
+                "idempotentReplay": {
+                    "type": "boolean"
+                },
+                "status": {
+                    "$ref": "#/definitions/domain.TransactionStatus"
+                },
+                "transactionId": {
+                    "type": "string"
+                }
+            }
+        },
+        "application.ReconciliationView": {
+            "type": "object",
+            "properties": {
+                "calculatedBalance": {
+                    "$ref": "#/definitions/application.MoneyView"
+                },
+                "checkedEntries": {
+                    "type": "integer"
+                },
+                "consistent": {
+                    "type": "boolean"
+                },
+                "difference": {
+                    "$ref": "#/definitions/application.MoneyView"
+                },
+                "storedBalance": {
+                    "$ref": "#/definitions/application.MoneyView"
+                },
+                "walletId": {
+                    "type": "string"
+                }
+            }
+        },
+        "application.TransactionView": {
+            "type": "object",
+            "properties": {
+                "attemptCount": {
+                    "type": "integer"
+                },
+                "createdAt": {
+                    "type": "string"
+                },
+                "externalTransactionId": {
+                    "type": "string"
+                },
+                "failureCode": {
+                    "type": "string"
+                },
+                "gameId": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "kind": {
+                    "$ref": "#/definitions/domain.TransactionKind"
+                },
+                "money": {
+                    "$ref": "#/definitions/application.MoneyView"
+                },
+                "nextAttemptAt": {
+                    "type": "string"
+                },
+                "playerId": {
+                    "type": "string"
+                },
+                "providerId": {
+                    "type": "string"
+                },
+                "referenceExternalTransactionId": {
+                    "type": "string"
+                },
+                "referenceTransactionId": {
+                    "type": "string"
+                },
+                "resultBalance": {
+                    "$ref": "#/definitions/application.MoneyView"
+                },
+                "roundId": {
+                    "type": "string"
+                },
+                "status": {
+                    "$ref": "#/definitions/domain.TransactionStatus"
+                },
+                "updatedAt": {
+                    "type": "string"
+                },
+                "walletId": {
+                    "type": "string"
+                }
+            }
+        },
+        "application.WalletView": {
+            "type": "object",
+            "properties": {
+                "balance": {
+                    "$ref": "#/definitions/application.MoneyView"
+                },
+                "createdAt": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "playerId": {
+                    "type": "string"
+                },
+                "updatedAt": {
+                    "type": "string"
+                },
+                "version": {
+                    "type": "integer"
+                }
+            }
+        },
+        "domain.LedgerDirection": {
+            "type": "string",
+            "enum": [
+                "DEBIT",
+                "CREDIT"
+            ],
+            "x-enum-varnames": [
+                "DirectionDebit",
+                "DirectionCredit"
+            ]
+        },
+        "domain.TransactionKind": {
+            "type": "string",
+            "enum": [
+                "OPENING",
+                "BET",
+                "WIN",
+                "LOSS",
+                "REFUND",
+                "ROLLBACK"
+            ],
+            "x-enum-varnames": [
+                "KindOpening",
+                "KindBet",
+                "KindWin",
+                "KindLoss",
+                "KindRefund",
+                "KindRollback"
+            ]
+        },
+        "domain.TransactionStatus": {
+            "type": "string",
+            "enum": [
+                "PENDING",
+                "PENDING_REFERENCE",
+                "PROCESSED",
+                "REJECTED",
+                "FAILED"
+            ],
+            "x-enum-varnames": [
+                "StatusPending",
+                "StatusPendingReference",
+                "StatusProcessed",
+                "StatusRejected",
+                "StatusFailed"
+            ]
+        },
+        "httpapi.CreateWalletRequest": {
+            "type": "object",
+            "required": [
+                "initialBalance",
+                "playerId"
+            ],
+            "properties": {
+                "initialBalance": {
+                    "$ref": "#/definitions/httpapi.MoneyRequest"
+                },
+                "playerId": {
+                    "type": "string",
+                    "example": "0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1"
+                }
+            }
+        },
+        "httpapi.HealthCheck": {
+            "type": "object",
+            "properties": {
+                "latencyMs": {
+                    "type": "integer",
+                    "example": 4
+                },
+                "message": {
+                    "type": "string",
+                    "example": "dependency unavailable"
+                },
+                "status": {
+                    "type": "string",
+                    "example": "up"
+                }
+            }
+        },
+        "httpapi.HealthResponse": {
+            "type": "object",
+            "properties": {
+                "checkedAt": {
+                    "type": "string",
+                    "format": "date-time"
+                },
+                "checks": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "$ref": "#/definitions/httpapi.HealthCheck"
+                    }
+                },
+                "status": {
+                    "type": "string",
+                    "example": "ready"
+                }
+            }
+        },
+        "httpapi.MoneyRequest": {
+            "type": "object",
+            "required": [
+                "amount",
+                "currency"
+            ],
+            "properties": {
+                "amount": {
+                    "type": "string",
+                    "example": "25.00"
+                },
+                "currency": {
+                    "type": "string",
+                    "example": "BRL"
+                }
+            }
+        },
+        "httpapi.ProblemDetail": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "example": "INVALID_REQUEST"
+                },
+                "message": {
+                    "type": "string",
+                    "example": "request is invalid"
+                }
+            }
+        },
+        "httpapi.ProblemResponse": {
+            "type": "object",
+            "properties": {
+                "error": {
+                    "$ref": "#/definitions/httpapi.ProblemDetail"
+                }
+            }
+        },
+        "httpapi.WagerRequest": {
+            "type": "object",
+            "required": [
+                "kind",
+                "money",
+                "playerId",
+                "walletId"
+            ],
+            "properties": {
+                "externalTransactionId": {
+                    "type": "string",
+                    "maxLength": 256,
+                    "example": "transaction-123"
+                },
+                "gameId": {
+                    "type": "string",
+                    "maxLength": 256,
+                    "example": "fortune-chimp"
+                },
+                "kind": {
+                    "type": "string",
+                    "enum": [
+                        "BET",
+                        "WIN",
+                        "LOSS",
+                        "REFUND",
+                        "ROLLBACK"
+                    ]
+                },
+                "money": {
+                    "$ref": "#/definitions/httpapi.MoneyRequest"
+                },
+                "playerId": {
+                    "type": "string",
+                    "example": "0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1"
+                },
+                "providerId": {
+                    "type": "string",
+                    "maxLength": 128,
+                    "example": "provider-a"
+                },
+                "referenceExternalTransactionId": {
+                    "type": "string",
+                    "maxLength": 256
+                },
+                "roundId": {
+                    "type": "string",
+                    "maxLength": 256,
+                    "example": "round-987"
+                },
+                "walletId": {
+                    "type": "string",
+                    "example": "0192f291-27dd-7d3f-8071-5f8685deef37"
+                }
+            }
+        }
+    },
+    "securityDefinitions": {
+        "InternalOAuth": {
+            "type": "oauth2",
+            "flow": "accessCode",
+            "authorizationUrl": "http://localhost:8081/realms/gaming/protocol/openid-connect/auth",
+            "tokenUrl": "http://localhost:8081/realms/gaming/protocol/openid-connect/token"
+        },
+        "ProviderOAuth": {
+            "type": "oauth2",
+            "flow": "accessCode",
+            "authorizationUrl": "http://localhost:8081/realms/gaming/protocol/openid-connect/auth",
+            "tokenUrl": "http://localhost:8081/realms/gaming/protocol/openid-connect/token"
+        }
+    }
+}

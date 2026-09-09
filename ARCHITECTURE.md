@@ -23,6 +23,12 @@ Fx aparece apenas no composition root e nos adaptadores que registram lifecycle 
 
 Validações estruturais dos comandos (campos obrigatórios, UUIDs, limites, tipos aceitos e metadados da inbox) usam `go-playground/validator` por tags declarativas. As invariantes financeiras e transições continuam no domínio para que nenhuma outra entrada consiga contorná-las.
 
+## Padrão de código Go
+
+O código segue o [Uber Go Style Guide](https://github.com/uber-go/guide/blob/master/style.md) como referência de estilo. A intenção é manter o serviço previsível para revisão e manutenção: formatação por `gofmt`, nomes idiomáticos, dependências recebidas por construtores, interfaces definidas no lado que as consome e erros propagados com contexto em vez de `panic` para fluxos esperados.
+
+Os pontos que afetam este serviço diretamente são o uso de `context.Context` em operações de I/O, `errors.Is`/`errors.As` para decisões de domínio, logs estruturados com `slog` e recursos fechados com `defer` ou pelo lifecycle do Fx. O guia de estilo não substitui as invariantes financeiras: regras de dinheiro, transições e concorrência continuam concentradas no domínio e reforçadas pelo PostgreSQL.
+
 ## Dinheiro
 
 `Money` guarda o valor em `int64` de unidades mínimas e uma moeda ISO 4217. A escala externa é obrigatoriamente duas casas. O parser não aceita sinal, expoente, `NaN`, infinito, espaços, escala adicional nem arredondamento. Soma, subtração e negação verificam overflow e exigem moedas iguais. O PostgreSQL persiste os centavos em `BIGINT` e a moeda separadamente.
@@ -117,17 +123,44 @@ Operações externas nascem em `PENDING`, mas as que não dependem de referênci
 
 Fx constrói configuração, pool, repositórios, casos de uso, OIDC, SQS, HTTP e workers. Hooks inicializam discovery e filas antes de servir tráfego. No shutdown, HTTP deixa de aceitar entradas, workers recebem cancelamento e o pool fecha por último conforme a ordem reversa do lifecycle.
 
-O serviço `migrate` do Docker Compose executa `golang-migrate` antes das APIs. As migrations SQL versionadas continuam em `internal/infrastructure/postgres/migrations`; a aplicação não altera schema durante seu startup. Os comandos de aplicação e reversão estão em `TESTING.md`.
+O serviço `migrate` do Docker Compose executa `golang-migrate` antes das APIs. As migrations SQL versionadas continuam em `internal/infrastructure/postgres/migrations`; a aplicação não altera schema durante seu startup. Os comandos de aplicação e reversão estão no `README.md`.
 
 ## Ambiente local
 
 O `compose.yaml` inicia PostgreSQL da aplicação, PostgreSQL isolado do IdP, Keycloak com import automático do realm, LocalStack limitado a SQS e três instâncias da API. A imagem da aplicação é multi-stage, contém somente os binários e certificados necessários e executa com usuário sem privilégios. Volumes nomeados preservam banco, identidade e filas entre reinícios.
 
+## Execução para avaliação
+
+Execute `docker compose up --build -d`. O `.env` está versionado intencionalmente com valores públicos deste desafio para não exigir setup adicional; ele contém apenas credenciais locais de Keycloak e LocalStack, nunca segredos de produção. O serviço `migrate` aplica as migrations antes de liberar as três APIs. Em uma instalação nova, o banco de domínio começa sem seed: carteiras, transações, ledger, inbox e outbox estão vazios. O import automático do Keycloak cria somente os clients OAuth locais necessários para autenticar a avaliação; não cria dados de negócio.
+
+Valide `GET http://localhost:8080/health/ready` antes de enviar operações financeiras. Com o ambiente pronto, `8080` disponibiliza Swagger e `api-1`; `8082` e `8083` disponibilizam `api-2` e `api-3`. As instâncias têm memória e pools próprios, mas compartilham PostgreSQL e filas. Portanto, uma carteira pode ser criada em `api-1`, movimentada em `api-2` e consultada em `api-3`, sem depender de estado em memória de uma única instância.
+
+Para o fluxo manual, use a identidade interna para criar/consultar carteiras e um client de provider para operações de aposta. O `README.md` contém os clients locais, chamadas HTTP portáveis, migrations, os resultados esperados e o procedimento para zerar apenas os volumes do Compose.
+
+Os E2E não usam esse Compose. A tag `integration` cria via Testcontainers um PostgreSQL vazio, Keycloak, LocalStack e três APIs efêmeras, sem reutilizar volumes, filas ou dados manuais. `docker compose down` apenas para os containers do ambiente manual; `docker compose down -v` também apaga seus volumes locais e deve ser usado somente para reiniciar esse ambiente do zero.
+
 ## Estratégia de testes
 
 Os testes unitários exercitam o domínio puro, hash/cursor da aplicação, retry da mensageria, métricas e o grafo Fx. A build tag `integration` sobe uma rede isolada por Testcontainers com PostgreSQL, LocalStack, Keycloak e três containers independentes da API; não reutiliza os containers, filas, banco ou volumes do Compose manual. Antes dos cenários, as migrations do `golang-migrate` são aplicadas em um PostgreSQL novo e o teste confirma que wallets, transações, ledger, inbox e outbox começam vazios. O realm importado no Keycloak é o único fixture e se limita aos clients OAuth de teste. Concorrência financeira é validada pelo estado final e pelo ledger, não por detalhes de implementação em memória. A recuperação da outbox também é exercitada no intervalo entre o `SendMessage` bem-sucedido e sua confirmação no banco: um lease abandonado é retomado por outro publisher com o mesmo `eventId` e payload imutável.
 
-O detector de corrida é executado em Linux porque o Go para Windows exige CGO e um compilador C. O `Dockerfile.test` instala GCC e pode executar a suíte contra o Docker socket; as dependências continuam sendo criadas e removidas pelo Testcontainers, sem perfil de testes do Compose. Os dois testes de recuperação que controlam o ciclo de vida dos containers usam a tag adicional `hostrecovery`, agora interrompendo e recriando exclusivamente as APIs efêmeras do Testcontainers; os comandos e a justificativa estão em `TESTING.md`. Tracing e testes de carga continuam como diferenciais opcionais do enunciado e não foram implementados.
+O detector de corrida é executado em Linux porque o Go para Windows exige CGO e um compilador C. O `Dockerfile.test` instala GCC e pode executar a suíte contra o Docker socket; as dependências continuam sendo criadas e removidas pelo Testcontainers, sem perfil de testes do Compose. Os dois testes de recuperação que controlam o ciclo de vida dos containers usam a tag adicional `hostrecovery`, interrompendo e recriando exclusivamente as APIs efêmeras do Testcontainers; os comandos estão no `README.md`. Testes de carga continuam como diferencial opcional do enunciado.
+
+## Evidências dos testes técnicos
+
+A suíte foi montada a partir da seção de verificação obrigatória do desafio, em vez de se limitar a testes de handler ou mocks. A intenção é que cada cenário importante deixe uma evidência reproduzível no repositório.
+
+| Verificação exigida | Evidência na suíte |
+| --- | --- |
+| Dinheiro, regras da carteira, cinco operações externas e idempotência | Testes unitários de domínio e aplicação validam escala, limites, transições, conflitos de payload e reprodução do resultado. |
+| Infraestrutura real e lifecycle | `integration` inicia PostgreSQL, Keycloak e LocalStack reais, aplica migrations, confirma banco vazio e executa o lifecycle Fx. |
+| OAuth e isolamento | Os testes obtêm tokens reais do Keycloak para os providers A, B e C; validam autorização interna, rejeição de acesso cruzado e ausência de efeito financeiro em tentativas bloqueadas. |
+| Três instâncias e concorrência | Os cenários usam três APIs independentes e verificam repetição idempotente, disputa de apostas sobre o mesmo saldo e avanço paralelo de carteiras distintas. |
+| Inbox, SQS, DLQ e recuperação | Há cobertura de deduplicação entre HTTP e SQS, mensagem inválida na DLQ, queda controlada depois do commit e antes do delete, além de reentrega segura. |
+| Outbox concorrente | Dois publishers disputam os mesmos eventos e o caso de publish confirmado pela fila, mas não pelo banco, é retomado preservando o `eventId`. |
+| Referências pendentes e reinício | `REFUND`/`ROLLBACK` antes da referência, resolução posterior e preservação de idempotência após reiniciar as APIs são exercitados com dependências reais. |
+| Corridas de dados | A mesma suíte pode ser executada em Linux com `go test -race`, pelo `Dockerfile.test`. |
+
+Além da suíte isolada, o roteiro do `README.md` permite conferir o pacote entregue no ambiente normal: build do Compose, migrations, health checks das três APIs, carteira em uma instância, aposta em outra, leitura/replay em uma terceira, reconciliação e bloqueio entre providers. Isso fecha a diferença entre testar os componentes em infraestrutura efêmera e testar a imagem que será avaliada.
 
 ## Observabilidade
 

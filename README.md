@@ -26,6 +26,25 @@ curl --fail-with-body http://localhost:8080/health/ready
 
 Espere o `migrate` terminar com sucesso e as três APIs aparecerem como em execução. A resposta de readiness deve informar `database`, as duas filas SQS e `identityProvider` como `up`. A partir daí, abra `http://localhost:8080/swagger/index.html` ou siga o fluxo HTTP abaixo.
 
+## Atalhos para avaliação
+
+Quem tiver GNU Make pode usar `make help` para listar os comandos. Os atalhos não
+escondem ambiente ou dados: `make check-compose` sobe o pacote normal e espera as
+três APIs; `make down` o encerra sem remover volumes. `make test` cobre o Go sem
+dependências externas, `make test-e2e` cria a infraestrutura isolada com
+Testcontainers e `make test-race` repete a E2E em Linux com `-race`.
+
+```sh
+make check-compose
+make test
+make test-e2e
+make test-race
+```
+
+`make test-all` encadeia todas essas verificações, incluindo `go vet`. Para apagar
+deliberadamente os volumes do Compose, use `make reset-local CONFIRM=1`; nenhum
+outro alvo remove dados locais.
+
 ## O que o Compose inicia
 
 O comando de subida executa o serviço `migrate` com `golang-migrate` antes de

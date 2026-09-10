@@ -401,9 +401,6 @@ func TestOutboundEventsMatchDocumentedContract(t *testing.T) {
 		t.Fatalf("pending reference status = %s, want PENDING_REFERENCE", pending.Status)
 	}
 
-	// The normal retry policy takes several minutes. Use the production recovery
-	// method with a one-attempt policy so the terminal-failure envelope is also
-	// emitted and verified in this integration test.
 	pool := newPool(t)
 	failingRecovery := application.NewWagerService(
 		postgresadapter.NewStore(pool),
@@ -1418,9 +1415,6 @@ func TestOutboxRecoversAfterPublishBeforeConfirmation(t *testing.T) {
 		t.Fatalf("marshal outbox recovery event: %v", err)
 	}
 
-	// The locked row is the durable state left by a publisher that has already
-	// claimed the event. It is deliberately inserted with a live lease so one of
-	// the running publishers cannot claim it before the simulated interruption.
 	if _, err := pool.Exec(
 		context.Background(),
 		`INSERT INTO outbox_events(
@@ -1437,8 +1431,6 @@ func TestOutboxRecoversAfterPublishBeforeConfirmation(t *testing.T) {
 		t.Fatalf("insert claimed outbox event: %v", err)
 	}
 
-	// This is the exact durable failure window: SendMessage succeeded, but the
-	// process terminates before MarkOutboxPublished can commit.
 	if _, err := sqsClient.SendMessage(context.Background(), &sqs.SendMessageInput{
 		QueueUrl:               aws.String(eventQueueURL),
 		MessageBody:            aws.String(string(payload)),
@@ -1459,9 +1451,6 @@ func TestOutboxRecoversAfterPublishBeforeConfirmation(t *testing.T) {
 		t.Fatal("outbox event was confirmed before the simulated interruption")
 	}
 
-	// Ending the lease models the publisher process disappearing. A normal
-	// publisher must reclaim the same row, retry SendMessage with the same event
-	// ID and confirm it; FIFO deduplication may collapse the duplicate delivery.
 	leaseRelease, err := pool.Exec(
 		context.Background(),
 		`UPDATE outbox_events SET locked_until=now()-interval '1 second'

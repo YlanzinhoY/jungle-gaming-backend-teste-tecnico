@@ -56,10 +56,6 @@ type e2eEnvironment struct {
 var testEnvironment *e2eEnvironment
 
 func TestMain(m *testing.M) {
-	// A cold API image build can take several minutes on a constrained Docker
-	// host. Keep the E2E environment isolated while giving startup a realistic
-	// bounded deadline. Set E2E_NO_CACHE=1 when cache bypass is specifically
-	// required; normal test runs still rebuild layers invalidated by source changes.
 	startContext, cancelStart := context.WithTimeout(context.Background(), 12*time.Minute)
 	environment, err := startE2EEnvironment(startContext)
 	cancelStart()

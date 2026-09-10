@@ -31,7 +31,7 @@ Espere o `migrate` terminar com sucesso e as três APIs aparecerem como em execu
 
 Quem tiver GNU Make pode usar `make help` para listar os comandos. Os atalhos não
 escondem ambiente ou dados: `make check-compose` sobe o pacote normal e espera as
-três APIs; `make down` o encerra sem remover volumes. `make test` cobre o Go sem
+três APIs; `make manual-flow` percorre a API como uma integração externa; `make down` o encerra sem remover volumes. `make test` cobre o Go sem
 dependências externas, `make test-fuzz` explora os contratos de `Money`,
 `make test-e2e` cria a infraestrutura isolada com Testcontainers e
 `make test-race` repete a E2E em Linux com `-race`. `make test-regression`
@@ -39,6 +39,7 @@ executa somente os casos de token expirado e reversões inválidas.
 
 ```sh
 make check-compose
+make manual-flow
 make test
 make test-fuzz
 make test-regression
@@ -323,77 +324,30 @@ ou consultar apostas.
 
 ## Fluxo manual completo, sem dados pré-criados
 
-O banco da aplicação começa vazio. O roteiro abaixo cria o jogador, a carteira e
-uma aposta; não depende de IDs ou transações deixadas por uma execução anterior.
-Ele usa `client_credentials`, como uma integração de serviço faria. Os clients e
-segredos são deliberadamente locais e públicos para a avaliação. O exemplo usa
-`curl`, `jq` e `uuidgen` somente no computador que está chamando a API; a API,
-o banco, Keycloak e SQS seguem todos nos containers do Compose.
+O script abaixo executa o roteiro como uma integração externa: usa
+`client_credentials` no Keycloak, cria uma carteira e envia BET/WIN com IDs
+aleatórios. Ele não depende de registros pré-existentes e funciona mesmo se o
+banco local já tiver dados de execuções anteriores.
+
+Use Bash (Linux, macOS, WSL ou Git Bash) e `curl`. Não é necessário instalar
+`jq`, Python, Go, um cliente PostgreSQL ou um cliente SQS. O script usa `uuidgen`
+quando disponível e possui fallbacks para Linux e OpenSSL.
 
 ```sh
-token() {
-  curl --silent --show-error --fail \
-    --user "$1:$2" \
-    --data "grant_type=client_credentials" \
-    http://localhost:8081/realms/gaming/protocol/openid-connect/token
-}
-
-export INTERNAL_TOKEN="$(token wallet-service wallet-service-local-secret | jq -r '.access_token')"
-export PROVIDER_A_TOKEN="$(token provider-a provider-a-local-secret | jq -r '.access_token')"
-export PLAYER_ID="$(uuidgen | tr '[:upper:]' '[:lower:]')"
-
-WALLET_JSON="$(curl --silent --show-error --fail-with-body \
-  -X POST http://localhost:8080/wallets \
-  -H "Authorization: Bearer $INTERNAL_TOKEN" \
-  -H 'Content-Type: application/json' \
-  --data @- <<JSON
-{"playerId":"$PLAYER_ID","initialBalance":{"amount":"100.00","currency":"BRL"}}
-JSON
-)"
-export WALLET_ID="$(printf '%s' "$WALLET_JSON" | jq -r '.id')"
-export EXTERNAL_TRANSACTION_ID="manual-bet-$(uuidgen)"
-export ROUND_ID="manual-round-$(uuidgen)"
-
-curl --silent --show-error --fail-with-body \
-  -X POST http://localhost:8082/wagering/transactions \
-  -H "Authorization: Bearer $PROVIDER_A_TOKEN" \
-  -H "Idempotency-Key: provider-a:$EXTERNAL_TRANSACTION_ID" \
-  -H 'Content-Type: application/json' \
-  --data @- <<JSON
-{
-  "providerId":"provider-a",
-  "externalTransactionId":"$EXTERNAL_TRANSACTION_ID",
-  "playerId":"$PLAYER_ID",
-  "walletId":"$WALLET_ID",
-  "roundId":"$ROUND_ID",
-  "gameId":"fortune-chimp",
-  "kind":"BET",
-  "money":{"amount":"25.00","currency":"BRL"}
-}
-JSON
-
-curl --silent --show-error --fail-with-body \
-  "http://localhost:8083/providers/provider-a/wagering/transactions/$EXTERNAL_TRANSACTION_ID" \
-  -H "Authorization: Bearer $PROVIDER_A_TOKEN"
-curl --silent --show-error --fail-with-body \
-  "http://localhost:8080/wallets/$WALLET_ID/ledger?limit=100" \
-  -H "Authorization: Bearer $INTERNAL_TOKEN"
-curl --silent --show-error --fail-with-body \
-  -X POST "http://localhost:8082/wallets/$WALLET_ID/reconciliation" \
-  -H "Authorization: Bearer $INTERNAL_TOKEN"
+make manual-flow
+# ou, depois de subir o Compose:
+bash scripts/manual-flow.sh
 ```
 
-O resultado esperado é a aposta em `PROCESSED`, saldo `75.00 BRL`, uma abertura
-e um débito no ledger, e reconciliação consistente. Note que cada leitura vai
-para uma instância diferente da API: `8080`, `8082` e `8083`. Reenvie exatamente
-o mesmo `POST` com a mesma `Idempotency-Key` para observar
-`idempotentReplay: true` sem um segundo débito. Trocar somente o token para o
-client `provider-b` e tentar consultar a transação de `provider-a` deve devolver
-`403 PROVIDER_FORBIDDEN`.
+O roteiro autentica os serviços interno, provider A e provider B; verifica health
+e métricas; cria e consulta a carteira em réplicas distintas; processa BET e WIN;
+prova o replay idempotente; consulta a transação pelos dois contratos; confere o
+ledger; executa reconciliação; e confirma que provider B recebe `403` ao tentar
+ler uma transação de provider A. No sucesso, imprime IDs gerados e saldo final de
+`115.00 BRL`.
 
-Se `jq` ou `uuidgen` não estiverem instalados, gere um UUID e copie o campo
-`access_token` do JSON retornado pelo endpoint do Keycloak. Eles aparecem no
-exemplo apenas para deixar o roteiro copiável; não são dependências da aplicação.
+Os payloads individuais continuam nas seções anteriores para testes pontuais pelo
+Swagger. O script não mostra tokens ou segredos na saída.
 
 Para acompanhar as mensagens de saída, a fila é `wager-events.fifo`; os formatos
 e as regras de deduplicação do consumidor estão em `docs/outbound-event-contract.md`.

@@ -181,7 +181,6 @@ func (q *Queues) Check(ctx context.Context) error {
 	return q.CheckEventQueue(ctx)
 }
 
-// CheckInputQueue verifies the queue that receives external wager operations.
 func (q *Queues) CheckInputQueue(ctx context.Context) error {
 	q.mu.RLock()
 	inputURL := q.inputURL
@@ -189,7 +188,6 @@ func (q *Queues) CheckInputQueue(ctx context.Context) error {
 	return q.checkQueue(ctx, "input", inputURL)
 }
 
-// CheckEventQueue verifies the queue that receives published domain events.
 func (q *Queues) CheckEventQueue(ctx context.Context) error {
 	q.mu.RLock()
 	eventURL := q.eventURL

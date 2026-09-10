@@ -10,7 +10,6 @@ import (
 
 const maxJSONBodyBytes = 1 << 20
 
-// decodeJSON accepts one bounded JSON value and rejects unknown fields.
 func decodeJSON(w http.ResponseWriter, r *http.Request, destination any) error {
 	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodyBytes)
 	decoder := json.NewDecoder(r.Body)

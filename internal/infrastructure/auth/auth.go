@@ -86,8 +86,6 @@ func (a *Authenticator) Middleware(next http.Handler) http.Handler {
 	})
 }
 
-// Check verifies that the configured identity provider is reachable and that
-// the locally configured token verifier has finished initialization.
 func (a *Authenticator) Check(ctx context.Context) error {
 	a.mu.RLock()
 	ready := a.verifier != nil

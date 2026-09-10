@@ -1,18 +1,15 @@
 package httpapi
 
-// MoneyRequest is the transport DTO for externally supplied money values.
 type MoneyRequest struct {
 	Amount   string `json:"amount" validate:"required" example:"25.00"`
 	Currency string `json:"currency" validate:"required,iso4217" example:"BRL"`
 }
 
-// CreateWalletRequest is the transport DTO for opening a wallet.
 type CreateWalletRequest struct {
 	InitialBalance MoneyRequest `json:"initialBalance" validate:"required"`
 	PlayerID       string       `json:"playerId" validate:"required,uuid" example:"0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1"`
 }
 
-// WagerRequest is the transport DTO for a provider transaction.
 type WagerRequest struct {
 	ExternalTransactionID          string       `json:"externalTransactionId" validate:"notblank,max=256" example:"transaction-123"`
 	GameID                         string       `json:"gameId" validate:"notblank,max=256" example:"fortune-chimp"`

@@ -7,7 +7,7 @@ E2E_TAGS ?= integration hostrecovery
 READY_TIMEOUT ?= 90
 FUZZ_TIME ?= 10s
 
-.PHONY: help build up down ps logs wait-ready check-compose reset-local vet test test-fuzz test-e2e test-regression test-recovery test-race test-all
+.PHONY: help build up down ps logs wait-ready check-compose manual-flow reset-local vet test test-fuzz test-e2e test-regression test-recovery test-race test-all
 
 help: ## Lista os atalhos de avaliação disponíveis.
 	@awk 'BEGIN { FS = ":.*##"; printf "Uso: make <alvo>\n\nAlvos:\n" } /^[a-zA-Z0-9_-]+:.*##/ { printf "  %-18s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
@@ -41,6 +41,9 @@ wait-ready: ## Espera as três APIs ficarem prontas (READY_TIMEOUT=90 por padrã
 
 check-compose: up wait-ready ## Sobe o pacote que será avaliado e confirma readiness.
 
+manual-flow: check-compose ## Executa o fluxo autenticado de carteira e apostas no Compose.
+	bash scripts/manual-flow.sh
+
 reset-local: ## Remove volumes do Compose; exige CONFIRM=1.
 	@test "$(CONFIRM)" = "1" || (echo "Use: make reset-local CONFIRM=1" >&2; exit 1)
 	$(COMPOSE) down -v
@@ -55,7 +58,7 @@ test-fuzz: ## Executa fuzzing limitado dos contratos de Money (FUZZ_TIME=10s por
 	$(GO) test ./internal/domain -run=^$$ -fuzz=FuzzParseMoneyRoundTrip -fuzztime=$(FUZZ_TIME)
 	$(GO) test ./internal/domain -run=^$$ -fuzz=FuzzMoneyJSONRoundTrip -fuzztime=$(FUZZ_TIME)
 
-test-e2e: ## Executa E2E isolado com PostgreSQL, Keycloak e LocalStack reais.
+test-e2e: ## Executa E2E isolado com PostgreSQL, Keycloak e MiniStack reais.
 	$(GO) test -count=1 -tags="$(E2E_TAGS)" ./integration -v
 
 test-regression: ## Executa regressões de autenticação e reversões em infraestrutura real.

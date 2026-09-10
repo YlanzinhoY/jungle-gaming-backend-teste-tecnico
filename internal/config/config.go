@@ -41,18 +41,15 @@ type OIDC struct {
 }
 
 type AWS struct {
-	Region       string `validate:"required"`
-	Endpoint     string `validate:"omitempty,http_url"`
-	AccessKey    string
-	SecretKey    string
-	InputQueue   string `validate:"required,endswith=.fifo"`
-	InputDLQ     string `validate:"required,endswith=.fifo"`
-	EventQueue   string `validate:"required,endswith=.fifo"`
-	EventDLQ     string `validate:"required,endswith=.fifo"`
-	CreateQueues bool
-	// DisableMessageChecksumValidation is only needed for an SQS-compatible local
-	// emulator that returns the original FIFO message checksum after deduplication.
-	// It must remain false for AWS SQS.
+	Region                           string `validate:"required"`
+	Endpoint                         string `validate:"omitempty,http_url"`
+	AccessKey                        string
+	SecretKey                        string
+	InputQueue                       string `validate:"required,endswith=.fifo"`
+	InputDLQ                         string `validate:"required,endswith=.fifo"`
+	EventQueue                       string `validate:"required,endswith=.fifo"`
+	EventDLQ                         string `validate:"required,endswith=.fifo"`
+	CreateQueues                     bool
 	DisableMessageChecksumValidation bool
 	MaxReceives                      int   `validate:"gte=1"`
 	Visibility                       int32 `validate:"gte=1,lte=43200"`

@@ -298,8 +298,6 @@ func (s *WagerService) ResolvePendingReference(ctx context.Context, transactionI
 	})
 }
 
-// RecordPendingReferenceFailure durably postpones a technical failure. A
-// repeatedly failing operation becomes terminal without moving money.
 func (s *WagerService) RecordPendingReferenceFailure(ctx context.Context, transactionID string) error {
 	now := time.Now().UTC()
 	return s.store.WithinTransaction(ctx, func(tx TxStore) error {

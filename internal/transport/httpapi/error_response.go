@@ -8,7 +8,6 @@ import (
 	"github.com/enzom/jungle-gaming/internal/domain"
 )
 
-// writeError translates application and domain errors into the HTTP contract.
 func writeError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, application.ErrNotFound):

@@ -21,8 +21,6 @@ type MetricsHandler interface {
 	ServeHTTP(http.ResponseWriter, *http.Request)
 }
 
-// Handler groups HTTP dependencies. Route registration, endpoint handlers,
-// serialization and middleware live in their dedicated files.
 type Handler struct {
 	wallets  *application.WalletService
 	wagers   *application.WagerService

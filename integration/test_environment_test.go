@@ -48,10 +48,11 @@ type e2eEnvironment struct {
 var testEnvironment *e2eEnvironment
 
 func TestMain(m *testing.M) {
-	// A no-cache API image build can take longer than five minutes on a cold
-	// Docker host. Keep the E2E environment isolated while giving startup a
-	// realistic bounded deadline.
-	startContext, cancelStart := context.WithTimeout(context.Background(), 8*time.Minute)
+	// A cold API image build can take several minutes on a constrained Docker
+	// host. Keep the E2E environment isolated while giving startup a realistic
+	// bounded deadline. Set E2E_NO_CACHE=1 when cache bypass is specifically
+	// required; normal test runs still rebuild layers invalidated by source changes.
+	startContext, cancelStart := context.WithTimeout(context.Background(), 12*time.Minute)
 	environment, err := startE2EEnvironment(startContext)
 	cancelStart()
 	if err != nil {
@@ -282,7 +283,7 @@ func (e *e2eEnvironment) buildAPIImage(ctx context.Context) error {
 			Repo:       "jungle-gaming-e2e",
 			Tag:        fmt.Sprint(time.Now().UnixNano()),
 			BuildOptionsModifier: func(options *client.ImageBuildOptions) {
-				options.NoCache = true
+				options.NoCache = os.Getenv("E2E_NO_CACHE") == "1"
 			},
 		},
 	})

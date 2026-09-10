@@ -188,6 +188,37 @@ func TestHealthMetricsAndAuthorization(t *testing.T) {
 	assertProblemCode(t, body, "ROUTE_METHOD_NOT_ALLOWED")
 }
 
+func TestExpiredTokenIsRejected(t *testing.T) {
+	waitFor(t, 30*time.Second, func() (bool, error) {
+		status, _, err := request(http.MethodGet, apiURLs[0]+"/health/ready", "", nil, nil)
+		return status == http.StatusOK, err
+	})
+
+	adminToken := passwordGrantToken(t, "master", "admin-cli", "admin", "admin-local")
+	originalLifespan := setRealmAccessTokenLifespan(t, adminToken, 1)
+	defer func() {
+		setRealmAccessTokenLifespan(t, adminToken, originalLifespan)
+	}()
+
+	expiring := clientCredentialsToken(t, "provider-a", "provider-a-local-secret")
+	if expiring.ExpiresIn < 1 || expiring.ExpiresIn > 2 {
+		t.Fatalf("short-lived token expires_in = %d, want one or two seconds", expiring.ExpiresIn)
+	}
+	time.Sleep(time.Duration(expiring.ExpiresIn+1) * time.Second)
+
+	status, body, err := request(
+		http.MethodGet,
+		apiURLs[0]+"/providers/provider-a/wagering/transactions/not-created",
+		expiring.AccessToken,
+		nil,
+		nil,
+	)
+	if err != nil || status != http.StatusUnauthorized {
+		t.Fatalf("expired token request = status %d, error %v, body %s", status, err, body)
+	}
+	assertProblemCode(t, body, "INVALID_TOKEN")
+}
+
 func TestProviderAIsIsolatedFromExistingProviderBTransaction(t *testing.T) {
 	client := newTestClient(t)
 	currentWallet := client.createWallet(t, "100.00")
@@ -691,6 +722,102 @@ func TestAllExternalOperationKindsAndReconciliation(t *testing.T) {
 	if err != nil || status != http.StatusOK || !bytes.Contains(body, []byte(`"consistent":true`)) {
 		t.Fatalf("reconciliation = status %d, error %v, body %s", status, err, body)
 	}
+}
+
+func TestInvalidReversalsAreAuditableAndDoNotMoveMoney(t *testing.T) {
+	client := newTestClient(t)
+
+	process := func(t *testing.T, currentWallet wallet, externalID, roundID, kind, amount, reference string) (int, wagerResult) {
+		t.Helper()
+		status, body, err := request(
+			http.MethodPost,
+			apiURLs[0]+"/wagering/transactions",
+			client.providerToken,
+			wagerPayload(currentWallet, externalID, roundID, kind, amount, reference),
+			map[string]string{"Idempotency-Key": "provider-a:" + externalID},
+		)
+		if err != nil {
+			t.Fatalf("%s %s request error: %v", kind, externalID, err)
+		}
+		var result wagerResult
+		if err := json.Unmarshal(body, &result); err != nil {
+			t.Fatalf("decode %s %s response: %v; body %s", kind, externalID, err, body)
+		}
+		return status, result
+	}
+
+	assertProcessed := func(t *testing.T, status int, result wagerResult) {
+		t.Helper()
+		if status != http.StatusOK || result.Status != "PROCESSED" {
+			t.Fatalf("processed operation = status %d, result %+v", status, result)
+		}
+	}
+
+	assertRejected := func(t *testing.T, status int, result wagerResult, failureCode string) {
+		t.Helper()
+		if status != http.StatusUnprocessableEntity || result.Status != "REJECTED" || result.FailureCode != failureCode {
+			t.Fatalf("rejected operation = status %d, result %+v, want 422/REJECTED/%s", status, result, failureCode)
+		}
+	}
+
+	t.Run("reference amount mismatch", func(t *testing.T) {
+		currentWallet := client.createWallet(t, "100.00")
+		roundID := "round-" + uuid.NewString()
+		betID := "bet-" + uuid.NewString()
+		status, result := process(t, currentWallet, betID, roundID, "BET", "20.00", "")
+		assertProcessed(t, status, result)
+
+		status, result = process(t, currentWallet, "refund-"+uuid.NewString(), roundID, "REFUND", "19.00", betID)
+		assertRejected(t, status, result, "REFERENCE_AMOUNT_MISMATCH")
+		client.assertWallet(t, apiURLs[1], currentWallet.ID, "80.00", 2)
+		client.assertLedgerEntries(t, currentWallet.ID, 2)
+	})
+
+	t.Run("reference identity mismatch", func(t *testing.T) {
+		referenceWallet := client.createWallet(t, "100.00")
+		otherWallet := client.createWallet(t, "100.00")
+		roundID := "round-" + uuid.NewString()
+		betID := "bet-" + uuid.NewString()
+		status, result := process(t, referenceWallet, betID, roundID, "BET", "20.00", "")
+		assertProcessed(t, status, result)
+
+		status, result = process(t, otherWallet, "refund-"+uuid.NewString(), roundID, "REFUND", "20.00", betID)
+		assertRejected(t, status, result, "REFERENCE_MISMATCH")
+		client.assertWallet(t, apiURLs[1], referenceWallet.ID, "80.00", 2)
+		client.assertLedgerEntries(t, referenceWallet.ID, 2)
+		client.assertWallet(t, apiURLs[2], otherWallet.ID, "100.00", 1)
+		client.assertLedgerEntries(t, otherWallet.ID, 1)
+	})
+
+	t.Run("reference already reversed", func(t *testing.T) {
+		currentWallet := client.createWallet(t, "100.00")
+		roundID := "round-" + uuid.NewString()
+		betID := "bet-" + uuid.NewString()
+		status, result := process(t, currentWallet, betID, roundID, "BET", "20.00", "")
+		assertProcessed(t, status, result)
+		status, result = process(t, currentWallet, "refund-"+uuid.NewString(), roundID, "REFUND", "20.00", betID)
+		assertProcessed(t, status, result)
+
+		status, result = process(t, currentWallet, "rollback-"+uuid.NewString(), roundID, "ROLLBACK", "20.00", betID)
+		assertRejected(t, status, result, "REFERENCE_ALREADY_REVERSED")
+		client.assertWallet(t, apiURLs[1], currentWallet.ID, "100.00", 3)
+		client.assertLedgerEntries(t, currentWallet.ID, 3)
+	})
+
+	t.Run("rollback debit has insufficient funds", func(t *testing.T) {
+		currentWallet := client.createWallet(t, "100.00")
+		roundID := "round-" + uuid.NewString()
+		winID := "win-" + uuid.NewString()
+		status, result := process(t, currentWallet, winID, roundID, "WIN", "50.00", "")
+		assertProcessed(t, status, result)
+		status, result = process(t, currentWallet, "bet-"+uuid.NewString(), roundID, "BET", "120.00", "")
+		assertProcessed(t, status, result)
+
+		status, result = process(t, currentWallet, "rollback-"+uuid.NewString(), roundID, "ROLLBACK", "50.00", winID)
+		assertRejected(t, status, result, "INSUFFICIENT_FUNDS_REVERSAL")
+		client.assertWallet(t, apiURLs[1], currentWallet.ID, "30.00", 3)
+		client.assertLedgerEntries(t, currentWallet.ID, 3)
+	})
 }
 
 func TestIdempotencyAcrossThreeInstances(t *testing.T) {
@@ -1342,7 +1469,17 @@ func newTestClient(t *testing.T) testClient {
 	}
 }
 
+type oauthToken struct {
+	AccessToken string `json:"access_token"`
+	ExpiresIn   int    `json:"expires_in"`
+}
+
 func token(t *testing.T, clientID, secret string) string {
+	t.Helper()
+	return clientCredentialsToken(t, clientID, secret).AccessToken
+}
+
+func clientCredentialsToken(t *testing.T, clientID, secret string) oauthToken {
 	t.Helper()
 	form := url.Values{
 		"grant_type":    {"client_credentials"},
@@ -1354,16 +1491,85 @@ func token(t *testing.T, clientID, secret string) string {
 		t.Fatalf("request %s token: %v", clientID, err)
 	}
 	defer response.Body.Close()
-	var body struct {
-		AccessToken string `json:"access_token"`
-	}
+	var body oauthToken
 	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
 		t.Fatalf("decode %s token: %v", clientID, err)
 	}
 	if response.StatusCode != http.StatusOK || body.AccessToken == "" {
 		t.Fatalf("%s token status = %d", clientID, response.StatusCode)
 	}
+	return body
+}
+
+func passwordGrantToken(t *testing.T, realm, clientID, username, password string) string {
+	t.Helper()
+	form := url.Values{
+		"grant_type": {"password"},
+		"client_id":  {clientID},
+		"username":   {username},
+		"password":   {password},
+	}
+	response, err := http.PostForm(keycloakURL+"/realms/"+realm+"/protocol/openid-connect/token", form)
+	if err != nil {
+		t.Fatalf("request %s password token: %v", clientID, err)
+	}
+	defer response.Body.Close()
+	var body oauthToken
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatalf("decode %s password token: %v", clientID, err)
+	}
+	if response.StatusCode != http.StatusOK || body.AccessToken == "" {
+		t.Fatalf("%s password token status = %d", clientID, response.StatusCode)
+	}
 	return body.AccessToken
+}
+
+func setRealmAccessTokenLifespan(t *testing.T, adminToken string, seconds int) int {
+	t.Helper()
+	realmURL := keycloakURL + "/admin/realms/gaming"
+	getRequest, err := http.NewRequest(http.MethodGet, realmURL, nil)
+	if err != nil {
+		t.Fatalf("build realm request: %v", err)
+	}
+	getRequest.Header.Set("Authorization", "Bearer "+adminToken)
+	getResponse, err := http.DefaultClient.Do(getRequest)
+	if err != nil {
+		t.Fatalf("get realm representation: %v", err)
+	}
+	defer getResponse.Body.Close()
+	if getResponse.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(getResponse.Body)
+		t.Fatalf("get realm representation status = %d, body %s", getResponse.StatusCode, body)
+	}
+	var realm map[string]any
+	if err := json.NewDecoder(getResponse.Body).Decode(&realm); err != nil {
+		t.Fatalf("decode realm representation: %v", err)
+	}
+	original, ok := realm["accessTokenLifespan"].(float64)
+	if !ok {
+		t.Fatalf("realm accessTokenLifespan = %T, want number", realm["accessTokenLifespan"])
+	}
+	realm["accessTokenLifespan"] = seconds
+	encoded, err := json.Marshal(realm)
+	if err != nil {
+		t.Fatalf("encode realm representation: %v", err)
+	}
+	putRequest, err := http.NewRequest(http.MethodPut, realmURL, bytes.NewReader(encoded))
+	if err != nil {
+		t.Fatalf("build realm update: %v", err)
+	}
+	putRequest.Header.Set("Authorization", "Bearer "+adminToken)
+	putRequest.Header.Set("Content-Type", "application/json")
+	putResponse, err := http.DefaultClient.Do(putRequest)
+	if err != nil {
+		t.Fatalf("update realm token lifespan: %v", err)
+	}
+	defer putResponse.Body.Close()
+	if putResponse.StatusCode != http.StatusNoContent {
+		body, _ := io.ReadAll(putResponse.Body)
+		t.Fatalf("update realm token lifespan status = %d, body %s", putResponse.StatusCode, body)
+	}
+	return int(original)
 }
 
 func (c testClient) createWallet(t *testing.T, amount string) wallet {

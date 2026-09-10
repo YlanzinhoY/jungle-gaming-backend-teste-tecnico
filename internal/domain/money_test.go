@@ -121,6 +121,29 @@ func TestMoneyJSON(t *testing.T) {
 	}
 }
 
+func TestMoneyJSONMinimumInt64Regression(t *testing.T) {
+	t.Parallel()
+
+	original, err := NewMoneyFromMinor(math.MinInt64, "BRL")
+	if err != nil {
+		t.Fatalf("NewMoneyFromMinor() error = %v", err)
+	}
+	encoded, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	if string(encoded) != `{"amount":"-92233720368547758.08","currency":"BRL"}` {
+		t.Fatalf("Marshal() = %s", encoded)
+	}
+	var decoded Money
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("Unmarshal(%s) error = %v", encoded, err)
+	}
+	if !decoded.Equal(original) {
+		t.Fatalf("round trip = %+v, want %+v", decoded, original)
+	}
+}
+
 func mustMoney(t *testing.T, amount, currency string) Money {
 	t.Helper()
 	money, err := ParseMoney(amount, currency)

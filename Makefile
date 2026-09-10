@@ -5,8 +5,9 @@ GO ?= go
 RACE_IMAGE ?= jungle-gaming-e2e-test
 E2E_TAGS ?= integration hostrecovery
 READY_TIMEOUT ?= 90
+FUZZ_TIME ?= 10s
 
-.PHONY: help build up down ps logs wait-ready check-compose reset-local vet test test-e2e test-recovery test-race test-all
+.PHONY: help build up down ps logs wait-ready check-compose reset-local vet test test-fuzz test-e2e test-regression test-recovery test-race test-all
 
 help: ## Lista os atalhos de avaliação disponíveis.
 	@awk 'BEGIN { FS = ":.*##"; printf "Uso: make <alvo>\n\nAlvos:\n" } /^[a-zA-Z0-9_-]+:.*##/ { printf "  %-18s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
@@ -50,8 +51,15 @@ vet: ## Executa a análise estática do Go.
 test: ## Executa a suíte rápida sem dependências externas.
 	$(GO) test -count=1 ./...
 
+test-fuzz: ## Executa fuzzing limitado dos contratos de Money (FUZZ_TIME=10s por alvo).
+	$(GO) test ./internal/domain -run=^$$ -fuzz=FuzzParseMoneyRoundTrip -fuzztime=$(FUZZ_TIME)
+	$(GO) test ./internal/domain -run=^$$ -fuzz=FuzzMoneyJSONRoundTrip -fuzztime=$(FUZZ_TIME)
+
 test-e2e: ## Executa E2E isolado com PostgreSQL, Keycloak e LocalStack reais.
 	$(GO) test -count=1 -tags="$(E2E_TAGS)" ./integration -v
+
+test-regression: ## Executa regressões de autenticação e reversões em infraestrutura real.
+	$(GO) test -count=1 -tags="integration" ./integration -run 'TestExpiredTokenIsRejected|TestInvalidReversalsAreAuditableAndDoNotMoveMoney' -v
 
 test-recovery: ## Executa apenas os cenários E2E que reiniciam APIs efêmeras.
 	$(GO) test -count=1 -tags="$(E2E_TAGS)" ./integration -run 'TestConsumerRedeliversAfterCommitBeforeDelete|TestRestartPreservesIdempotencyAndPendingReference' -v
@@ -62,4 +70,4 @@ test-race: ## Executa a suíte E2E em Linux com o detector de corridas.
 		-e TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal \
 		$(RACE_IMAGE) test -count=1 -race -tags="$(E2E_TAGS)" ./integration -v
 
-test-all: vet test test-e2e test-race ## Executa todas as validações da entrega.
+test-all: vet test test-fuzz test-e2e test-race ## Executa todas as validações da entrega.

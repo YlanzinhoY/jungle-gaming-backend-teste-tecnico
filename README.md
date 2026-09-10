@@ -31,19 +31,41 @@ Espere o `migrate` terminar com sucesso e as três APIs aparecerem como em execu
 Quem tiver GNU Make pode usar `make help` para listar os comandos. Os atalhos não
 escondem ambiente ou dados: `make check-compose` sobe o pacote normal e espera as
 três APIs; `make down` o encerra sem remover volumes. `make test` cobre o Go sem
-dependências externas, `make test-e2e` cria a infraestrutura isolada com
-Testcontainers e `make test-race` repete a E2E em Linux com `-race`.
+dependências externas, `make test-fuzz` explora os contratos de `Money`,
+`make test-e2e` cria a infraestrutura isolada com Testcontainers e
+`make test-race` repete a E2E em Linux com `-race`. `make test-regression`
+executa somente os casos de token expirado e reversões inválidas.
 
 ```sh
 make check-compose
 make test
+make test-fuzz
+make test-regression
 make test-e2e
 make test-race
 ```
 
-`make test-all` encadeia todas essas verificações, incluindo `go vet`. Para apagar
-deliberadamente os volumes do Compose, use `make reset-local CONFIRM=1`; nenhum
-outro alvo remove dados locais.
+`make test-all` encadeia `go vet`, testes rápidos, fuzzing, E2E e race detector.
+O fuzzing usa dez segundos por alvo por padrão; ajuste com, por exemplo,
+`make test-fuzz FUZZ_TIME=1m`. Para apagar deliberadamente os volumes do Compose,
+use `make reset-local CONFIRM=1`; nenhum outro alvo remove dados locais.
+
+### Evidência de fuzzing
+
+Na validação de 9 de setembro de 2026, os dois alvos foram executados por dez
+segundos cada e completaram **3.148.324 execuções sem falhas** após a correção
+da desserialização do limite `math.MinInt64`:
+
+| Alvo | Execuções | Resultado |
+| --- | ---: | --- |
+| `FuzzParseMoneyRoundTrip` | 1.734.204 | `PASS` |
+| `FuzzMoneyJSONRoundTrip` | 1.414.120 | `PASS` |
+| **Total** | **3.148.324** | **Nenhuma falha encontrada** |
+
+Essa contagem é um retrato da execução registrada, não uma quantidade fixa:
+ela varia conforme hardware, carga da máquina, número de workers e `FUZZ_TIME`.
+O resultado reproduzível é a aprovação das propriedades verificadas pelos
+fuzzers durante o tempo configurado.
 
 ## O que o Compose inicia
 
@@ -78,15 +100,176 @@ avaliação local. Não há IAM nem segredo de produção neste projeto.
 | --- | --- | --- |
 | Swagger | http://localhost:8080/swagger/index.html | Use **Authorize** e escolha o fluxo desejado abaixo. |
 | Keycloak Admin | http://localhost:8081 | `admin` / `admin-local` |
-| Swagger interno | OAuth client `swagger-internal` | `wallet-tester` / `wallet-tester-local` |
-| Swagger provider A | OAuth client `swagger-provider-a` | `provider-a-tester` / `provider-a-tester-local` |
-| Swagger provider B | OAuth client `swagger-provider-b` | `provider-b-tester` / `provider-b-tester-local` |
-| Swagger provider C | OAuth client `swagger-provider-c` | `provider-c-tester` / `provider-c-tester-local` |
+| Swagger interno | `client_id`: `swagger-internal` | `wallet-tester` / `wallet-tester-local` |
+| Swagger provider A | `client_id`: `swagger-provider-a` | `provider-a-tester` / `provider-a-tester-local` |
+| Swagger provider B | `client_id`: `swagger-provider-b` | `provider-b-tester` / `provider-b-tester-local` |
+| Swagger provider C | `client_id`: `swagger-provider-c` | `provider-c-tester` / `provider-c-tester-local` |
 | Provider A service-to-service | client `provider-a` | secret `provider-a-local-secret` |
 | Provider B service-to-service | client `provider-b` | secret `provider-b-local-secret` |
 | Provider C service-to-service | client `provider-c` | secret `provider-c-local-secret` |
 | Carteiras service-to-service | client `wallet-service` | secret `wallet-service-local-secret` |
 | LocalStack SQS | http://localhost:4566 | access key `test`; secret `test`; região `us-east-1` |
+
+No modal **Available authorizations** do Swagger, preencha os campos desta forma:
+
+| Autorização | Operações | `client_id` | `client_secret` | Login no Keycloak |
+| --- | --- | --- | --- | --- |
+| `InternalOAuth` | Abrir e consultar carteiras | `swagger-internal` | Deixe vazio | `wallet-tester` / `wallet-tester-local` |
+| `ProviderOAuth` (provider A) | Enviar e consultar apostas do provider A | `swagger-provider-a` | Deixe vazio | `provider-a-tester` / `provider-a-tester-local` |
+| `ProviderOAuth` (provider B) | Enviar e consultar apostas do provider B | `swagger-provider-b` | Deixe vazio | `provider-b-tester` / `provider-b-tester-local` |
+| `ProviderOAuth` (provider C) | Enviar e consultar apostas do provider C | `swagger-provider-c` | Deixe vazio | `provider-c-tester` / `provider-c-tester-local` |
+
+Esses clients do Swagger são públicos e usam Authorization Code com PKCE;
+por isso, não informe `client_secret`. Depois de preencher o `client_id`, clique
+em **Authorize** e use o login indicado na tabela.
+
+## Exemplos por rota no Swagger
+
+As rotas `GET` e a reconciliação não recebem payload. Use os IDs devolvidos
+pelas rotas de criação e processamento nos respectivos parâmetros de path.
+
+| Rota | Autorização | O que informar |
+| --- | --- | --- |
+| `GET /health/live` | Pública | Nenhum parâmetro ou payload |
+| `GET /health/ready` | Pública | Nenhum parâmetro ou payload |
+| `GET /metrics` | Pública | Nenhum parâmetro ou payload |
+| `POST /wallets` | `InternalOAuth` | Payload de abertura mostrado abaixo |
+| `GET /wallets/{walletId}` | `InternalOAuth` | `walletId` devolvido ao abrir a carteira |
+| `GET /wallets/{walletId}/ledger` | `InternalOAuth` | `walletId`, `limit` de 1 a 100 e `cursor` apenas para a próxima página |
+| `POST /wallets/{walletId}/reconciliation` | `InternalOAuth` | Somente `walletId`; não recebe payload |
+| `POST /wagering/transactions` | `ProviderOAuth` | `Idempotency-Key` e um dos payloads de transação abaixo |
+| `GET /wagering/transactions/{transactionId}` | `InternalOAuth` | ID interno `transactionId` devolvido no processamento |
+| `GET /providers/{providerId}/wagering/transactions/{externalTransactionId}` | `ProviderOAuth` | Por exemplo, `provider-a` e `bet-001` |
+
+### Abrir uma carteira
+
+Em `POST /wallets`, use um `playerId` UUID novo. O tipo `OPENING` é criado
+automaticamente por essa rota e não pode ser enviado como uma transação externa.
+
+```json
+{
+  "playerId": "0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1",
+  "initialBalance": {
+    "amount": "100.00",
+    "currency": "BRL"
+  }
+}
+```
+
+Copie o campo `id` da resposta e use-o como `walletId` nos exemplos seguintes.
+Mantenha também o mesmo `playerId` e a moeda da carteira.
+
+### Transações de aposta
+
+Em `POST /wagering/transactions`, o `providerId` precisa corresponder ao client
+usado no `ProviderOAuth`. Cada nova operação exige um
+`externalTransactionId` e uma `Idempotency-Key` novos. O `X-Correlation-ID` é
+opcional; se omitido, a API gera um identificador.
+
+Substitua `<WALLET_ID>` pelo `id` recebido na abertura da carteira. Os exemplos
+abaixo formam uma sequência válida usando a mesma carteira e rodada.
+
+#### BET — debita o valor da aposta
+
+`Idempotency-Key: provider-a:bet-001`
+
+```json
+{
+  "externalTransactionId": "bet-001",
+  "gameId": "fortune-chimp",
+  "kind": "BET",
+  "money": { "amount": "25.00", "currency": "BRL" },
+  "playerId": "0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1",
+  "providerId": "provider-a",
+  "roundId": "round-001",
+  "walletId": "<WALLET_ID>"
+}
+```
+
+#### WIN — credita o prêmio
+
+`Idempotency-Key: provider-a:win-001`
+
+```json
+{
+  "externalTransactionId": "win-001",
+  "gameId": "fortune-chimp",
+  "kind": "WIN",
+  "money": { "amount": "40.00", "currency": "BRL" },
+  "playerId": "0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1",
+  "providerId": "provider-a",
+  "referenceExternalTransactionId": "bet-001",
+  "roundId": "round-001",
+  "walletId": "<WALLET_ID>"
+}
+```
+
+A referência a uma `BET` da mesma rodada é opcional para `WIN`; remova
+`referenceExternalTransactionId` quando o prêmio não possuir essa referência.
+
+#### LOSS — registra a perda sem nova movimentação
+
+`Idempotency-Key: provider-a:loss-001`
+
+```json
+{
+  "externalTransactionId": "loss-001",
+  "gameId": "fortune-chimp",
+  "kind": "LOSS",
+  "money": { "amount": "0.00", "currency": "BRL" },
+  "playerId": "0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1",
+  "providerId": "provider-a",
+  "roundId": "round-001",
+  "walletId": "<WALLET_ID>"
+}
+```
+
+`LOSS` exige valor `0.00`, não cria lançamento no ledger e não altera o saldo.
+
+#### REFUND — devolve integralmente uma BET
+
+`Idempotency-Key: provider-a:refund-001`
+
+```json
+{
+  "externalTransactionId": "refund-001",
+  "gameId": "fortune-chimp",
+  "kind": "REFUND",
+  "money": { "amount": "25.00", "currency": "BRL" },
+  "playerId": "0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1",
+  "providerId": "provider-a",
+  "referenceExternalTransactionId": "bet-001",
+  "roundId": "round-001",
+  "walletId": "<WALLET_ID>"
+}
+```
+
+#### ROLLBACK — desfaz integralmente outra movimentação
+
+Este exemplo desfaz a `WIN` anterior. Portanto, o valor precisa ser exatamente
+o mesmo da operação referenciada.
+
+`Idempotency-Key: provider-a:rollback-001`
+
+```json
+{
+  "externalTransactionId": "rollback-001",
+  "gameId": "fortune-chimp",
+  "kind": "ROLLBACK",
+  "money": { "amount": "40.00", "currency": "BRL" },
+  "playerId": "0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1",
+  "providerId": "provider-a",
+  "referenceExternalTransactionId": "win-001",
+  "roundId": "round-001",
+  "walletId": "<WALLET_ID>"
+}
+```
+
+`REFUND` e `ROLLBACK` exigem `referenceExternalTransactionId`, identidade
+compatível e o valor integral da transação referenciada. Se a referência ainda
+não existir, a resposta pode ser `202 PENDING_REFERENCE` até ela ser resolvida.
+Reenviar exatamente o mesmo payload com a mesma `Idempotency-Key` é seguro e
+deve retornar `idempotentReplay: true`, sem aplicar novamente a movimentação.
 
 As filas são criadas automaticamente: `wager-transactions.fifo`, sua DLQ,
 `wager-events.fifo` e sua DLQ. Para testar manualmente no Swagger, autentique
@@ -255,6 +438,11 @@ registro, preserva o `eventId` e confirma a publicação.
 
 Os endereços usados pelo teste são resolvidos dinamicamente; nenhum endpoint,
 volume ou fila do ambiente manual é reutilizado.
+
+A build E2E reaproveita camadas válidas do Docker, mas sempre recompila as
+camadas invalidadas pelo código atual. Para uma verificação deliberadamente sem
+cache, execute `E2E_NO_CACHE=1 make test-e2e` em Linux/macOS ou defina essa
+variável no PowerShell antes do comando equivalente.
 
 ## Cenários de recuperação que controlam containers
 

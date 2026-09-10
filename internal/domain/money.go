@@ -44,20 +44,31 @@ func (m *Money) UnmarshalJSON(data []byte) error {
 	if negative {
 		amount = amount[1:]
 	}
-	parsed, err := ParseMoney(amount, encoded.Currency)
-	if err != nil {
-		return err
-	}
-	if negative {
-		if parsed.IsZero() {
-			return fmt.Errorf("%w: negative zero is not canonical", ErrInvalidMoney)
-		}
-		parsed, err = parsed.Negate()
+	if !negative {
+		parsed, err := ParseMoney(amount, encoded.Currency)
 		if err != nil {
 			return err
 		}
+		*m = parsed
+		return nil
 	}
-	*m = parsed
+	if _, err := parseCurrency(encoded.Currency); err != nil {
+		return fmt.Errorf("%w: currency must be an ISO 4217 uppercase code", ErrInvalidMoney)
+	}
+	absolute, err := parseNonNegativeMinor(amount, uint64(math.MaxInt64)+1)
+	if err != nil {
+		return err
+	}
+	if absolute == 0 {
+		return fmt.Errorf("%w: negative zero is not canonical", ErrInvalidMoney)
+	}
+	var minor int64
+	if absolute == uint64(math.MaxInt64)+1 {
+		minor = math.MinInt64
+	} else {
+		minor = -int64(absolute)
+	}
+	*m = Money{minor: minor, currency: encoded.Currency}
 	return nil
 }
 
@@ -65,22 +76,30 @@ func ParseMoney(amount, currency string) (Money, error) {
 	if _, err := parseCurrency(currency); err != nil {
 		return Money{}, fmt.Errorf("%w: currency must be an ISO 4217 uppercase code", ErrInvalidMoney)
 	}
+	minor, err := parseNonNegativeMinor(amount, uint64(math.MaxInt64))
+	if err != nil {
+		return Money{}, err
+	}
+	return Money{minor: int64(minor), currency: currency}, nil
+}
+
+func parseNonNegativeMinor(amount string, maximum uint64) (uint64, error) {
 	matches := _amountPattern.FindStringSubmatch(amount)
 	if matches == nil {
-		return Money{}, fmt.Errorf(
+		return 0, fmt.Errorf(
 			"%w: amount must be a non-negative decimal with exactly two digits of scale",
 			ErrInvalidMoney,
 		)
 	}
 	major, err := strconv.ParseUint(matches[1], 10, 64)
 	if err != nil {
-		return Money{}, fmt.Errorf("%w: amount is outside int64 range", ErrMoneyOverflow)
+		return 0, fmt.Errorf("%w: amount is outside int64 range", ErrMoneyOverflow)
 	}
 	cents, _ := strconv.ParseUint(matches[2], 10, 64)
-	if major > uint64((math.MaxInt64-int64(cents))/100) {
-		return Money{}, fmt.Errorf("%w: amount is outside int64 range", ErrMoneyOverflow)
+	if major > (maximum-cents)/100 {
+		return 0, fmt.Errorf("%w: amount is outside int64 range", ErrMoneyOverflow)
 	}
-	return Money{minor: int64(major*100 + cents), currency: currency}, nil
+	return major*100 + cents, nil
 }
 
 func NewMoneyFromMinor(minor int64, currency string) (Money, error) {

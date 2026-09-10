@@ -14,14 +14,17 @@ x-api-environment: &api-environment
   OIDC_INTERNAL_ROLE: wallet-service
   OIDC_STARTUP_TIMEOUT: 30s
   AWS_REGION: us-east-1
-  AWS_ENDPOINT_URL: http://localstack:4566
-  AWS_ACCESS_KEY_ID: test
-  AWS_SECRET_ACCESS_KEY: test
+  AWS_ENDPOINT_URL: http://ministack:4566
+  AWS_SHARED_CREDENTIALS_FILE: /run/sqs-credentials/credentials
+  AWS_PROFILE: application
   SQS_INPUT_QUEUE: wager-transactions.fifo
   SQS_INPUT_DLQ: wager-transactions-dlq.fifo
   SQS_EVENT_QUEUE: wager-events.fifo
   SQS_EVENT_DLQ: wager-events-dlq.fifo
-  SQS_CREATE_QUEUES: "true"
+  SQS_CREATE_QUEUES: "false"
+  # MiniStack preserves the first FIFO response checksum after deduplication.
+  # AWS SQS deployments must keep this false (the application default).
+  SQS_DISABLE_MESSAGE_CHECKSUM_VALIDATION: "true"
   SQS_MAX_RECEIVES: 5
   SQS_VISIBILITY_TIMEOUT_SECONDS: 30
   SQS_RETRY_BASE_BACKOFF: 2s
@@ -56,7 +59,7 @@ x-api-service: &api-service
       condition: service_completed_successfully
     keycloak:
       condition: service_healthy
-    localstack:
+    ministack:
       condition: service_healthy
     jaeger:
       condition: service_started
@@ -64,6 +67,8 @@ x-api-service: &api-service
   stop_grace_period: 20s
   networks:
     - wagering
+  volumes:
+    - sqs-app-credentials:/run/sqs-credentials:ro
 
 services:
   postgres:
@@ -158,23 +163,57 @@ services:
     networks:
       - wagering
 
-  localstack:
-    image: localstack/localstack:4.8.1
+  ministack:
+    image: ministackorg/ministack:1.5.0
     environment:
-      SERVICES: sqs
+      AUTH: "true"
       AWS_DEFAULT_REGION: us-east-1
-      PERSISTENCE: "1"
-      DEBUG: "0"
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      PERSIST_STATE: "1"
+      STATE_DIR: /var/lib/ministack
+      SQS_APP_CREDENTIALS_PATH: /var/lib/sqs-app-credentials/credentials
+      SQS_TOOLING_CREDENTIALS_PATH: /var/lib/sqs-tooling-credentials/credentials
+      SQS_IAM_READY_PATH: /var/lib/sqs-app-credentials/ready
+      SQS_INPUT_QUEUE: wager-transactions.fifo
+      SQS_INPUT_DLQ: wager-transactions-dlq.fifo
+      SQS_EVENT_QUEUE: wager-events.fifo
+      SQS_EVENT_DLQ: wager-events-dlq.fifo
+      SQS_MAX_RECEIVES: 5
+      SQS_VISIBILITY_TIMEOUT_SECONDS: 30
     ports:
       - "${LOCALSTACK_PORT:-4566}:4566"
     volumes:
-      - localstack-data:/var/lib/localstack
+      - ministack-data:/var/lib/ministack
+      - sqs-app-credentials:/var/lib/sqs-app-credentials
+      - sqs-tooling-credentials:/var/lib/sqs-tooling-credentials
+      - ./scripts/aws-emulator/00-clear-ready.sh:/docker-entrypoint-initaws.d/00-clear-ready.sh:ro
+      - ./scripts/aws-emulator/10-bootstrap.py:/docker-entrypoint-initaws.d/ready.d/10-bootstrap.py:ro
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:4566/_localstack/health | grep -q '\"sqs\"'"]
+      test:
+        - CMD-SHELL
+        - >-
+          test -s /var/lib/sqs-app-credentials/ready &&
+          python -c "import urllib.request; urllib.request.urlopen('http://localhost:4566/_ministack/health', timeout=2)"
       interval: 5s
       timeout: 3s
       retries: 20
     restart: unless-stopped
+    networks:
+      - wagering
+
+  sqs-cli:
+    image: ministackorg/ministack:1.5.0
+    profiles: [tools]
+    entrypoint: ["aws", "--endpoint-url", "http://ministack:4566"]
+    environment:
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_SHARED_CREDENTIALS_FILE: /run/sqs-credentials/credentials
+    volumes:
+      - sqs-tooling-credentials:/run/sqs-credentials:ro
+    depends_on:
+      ministack:
+        condition: service_healthy
     networks:
       - wagering
 
@@ -226,7 +265,9 @@ volumes:
   postgres-data:
   pgadmin-data:
   keycloak-data:
-  localstack-data:
+  ministack-data:
+  sqs-app-credentials:
+  sqs-tooling-credentials:
 
 networks:
   wagering:

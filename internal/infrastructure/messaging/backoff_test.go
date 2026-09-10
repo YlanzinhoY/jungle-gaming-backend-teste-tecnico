@@ -7,6 +7,61 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 )
 
+func TestNormalizeQueueURL(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		queueURL string
+		endpoint string
+		want     string
+		wantErr  bool
+	}{
+		{
+			name:     "uses broker endpoint while preserving queue path",
+			queueURL: "http://localhost:4566/000000000000/wager-events.fifo",
+			endpoint: "http://ministack:4566",
+			want:     "http://ministack:4566/000000000000/wager-events.fifo",
+		},
+		{
+			name:     "does not alter URL without configured endpoint",
+			queueURL: "https://sqs.example.test/queue",
+			want:     "https://sqs.example.test/queue",
+		},
+		{
+			name:     "rejects relative queue URL",
+			queueURL: "/000000000000/wager-events.fifo",
+			endpoint: "http://ministack:4566",
+			wantErr:  true,
+		},
+		{
+			name:     "rejects relative endpoint",
+			queueURL: "http://localhost:4566/000000000000/wager-events.fifo",
+			endpoint: "/sqs",
+			wantErr:  true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := normalizeQueueURL(test.queueURL, test.endpoint)
+			if test.wantErr {
+				if err == nil {
+					t.Fatal("normalizeQueueURL() error = nil, want error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("normalizeQueueURL() error = %v", err)
+			}
+			if got != test.want {
+				t.Fatalf("normalizeQueueURL() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestRetryDelay(t *testing.T) {
 	t.Parallel()
 

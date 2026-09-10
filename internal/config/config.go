@@ -43,15 +43,19 @@ type OIDC struct {
 type AWS struct {
 	Region       string `validate:"required"`
 	Endpoint     string `validate:"omitempty,http_url"`
-	AccessKey    string `validate:"required"`
-	SecretKey    string `validate:"required"`
+	AccessKey    string
+	SecretKey    string
 	InputQueue   string `validate:"required,endswith=.fifo"`
 	InputDLQ     string `validate:"required,endswith=.fifo"`
 	EventQueue   string `validate:"required,endswith=.fifo"`
 	EventDLQ     string `validate:"required,endswith=.fifo"`
 	CreateQueues bool
-	MaxReceives  int   `validate:"gte=1"`
-	Visibility   int32 `validate:"gte=1,lte=43200"`
+	// DisableMessageChecksumValidation is only needed for an SQS-compatible local
+	// emulator that returns the original FIFO message checksum after deduplication.
+	// It must remain false for AWS SQS.
+	DisableMessageChecksumValidation bool
+	MaxReceives                      int   `validate:"gte=1"`
+	Visibility                       int32 `validate:"gte=1,lte=43200"`
 }
 
 type Workers struct {
@@ -101,17 +105,18 @@ func Load() (Config, error) {
 			StartupTimeout: parser.duration("OIDC_STARTUP_TIMEOUT", 10*time.Second),
 		},
 		AWS: AWS{
-			Region:       env("AWS_REGION", "us-east-1"),
-			Endpoint:     env("AWS_ENDPOINT_URL", "http://localhost:4566"),
-			AccessKey:    env("AWS_ACCESS_KEY_ID", "test"),
-			SecretKey:    env("AWS_SECRET_ACCESS_KEY", "test"),
-			InputQueue:   env("SQS_INPUT_QUEUE", "wager-transactions.fifo"),
-			InputDLQ:     env("SQS_INPUT_DLQ", "wager-transactions-dlq.fifo"),
-			EventQueue:   env("SQS_EVENT_QUEUE", "wager-events.fifo"),
-			EventDLQ:     env("SQS_EVENT_DLQ", "wager-events-dlq.fifo"),
-			CreateQueues: parser.boolean("SQS_CREATE_QUEUES", true),
-			MaxReceives:  parser.integer("SQS_MAX_RECEIVES", 5),
-			Visibility:   int32(parser.integer("SQS_VISIBILITY_TIMEOUT_SECONDS", 30)),
+			Region:                           env("AWS_REGION", "us-east-1"),
+			Endpoint:                         env("AWS_ENDPOINT_URL", "http://localhost:4566"),
+			AccessKey:                        env("AWS_ACCESS_KEY_ID", ""),
+			SecretKey:                        env("AWS_SECRET_ACCESS_KEY", ""),
+			InputQueue:                       env("SQS_INPUT_QUEUE", "wager-transactions.fifo"),
+			InputDLQ:                         env("SQS_INPUT_DLQ", "wager-transactions-dlq.fifo"),
+			EventQueue:                       env("SQS_EVENT_QUEUE", "wager-events.fifo"),
+			EventDLQ:                         env("SQS_EVENT_DLQ", "wager-events-dlq.fifo"),
+			CreateQueues:                     parser.boolean("SQS_CREATE_QUEUES", true),
+			DisableMessageChecksumValidation: parser.boolean("SQS_DISABLE_MESSAGE_CHECKSUM_VALIDATION", false),
+			MaxReceives:                      parser.integer("SQS_MAX_RECEIVES", 5),
+			Visibility:                       int32(parser.integer("SQS_VISIBILITY_TIMEOUT_SECONDS", 30)),
 		},
 		Workers: Workers{
 			Enabled:                 parser.boolean("WORKERS_ENABLED", true),
@@ -144,6 +149,9 @@ func Load() (Config, error) {
 }
 
 func (c Config) Validate() error {
+	if (c.AWS.AccessKey == "") != (c.AWS.SecretKey == "") {
+		return errors.New("invalid configuration: AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY must be set together")
+	}
 	validate := validator.New(validator.WithRequiredStructEnabled())
 	if err := validate.Struct(c); err != nil {
 		return fmt.Errorf("invalid configuration: %w", err)

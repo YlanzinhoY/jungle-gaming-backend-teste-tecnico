@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"sort"
 	"sync"
 
@@ -34,7 +35,11 @@ type Queues struct {
 func NewSQSClient(cfg config.Config, tracing *observability.Tracing) (*sqs.Client, error) {
 	options := []func(*awsconfig.LoadOptions) error{
 		awsconfig.WithRegion(cfg.AWS.Region),
-		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(cfg.AWS.AccessKey, cfg.AWS.SecretKey, "")),
+	}
+	if cfg.AWS.AccessKey != "" && cfg.AWS.SecretKey != "" {
+		options = append(options, awsconfig.WithCredentialsProvider(
+			credentials.NewStaticCredentialsProvider(cfg.AWS.AccessKey, cfg.AWS.SecretKey, ""),
+		))
 	}
 	awsCfg, err := awsconfig.LoadDefaultConfig(context.Background(), options...)
 	if err != nil {
@@ -45,6 +50,7 @@ func NewSQSClient(cfg config.Config, tracing *observability.Tracing) (*sqs.Clien
 		if cfg.AWS.Endpoint != "" {
 			options.BaseEndpoint = aws.String(cfg.AWS.Endpoint)
 		}
+		options.DisableMessageChecksumValidation = cfg.AWS.DisableMessageChecksumValidation
 	}), nil
 }
 
@@ -112,6 +118,11 @@ func (q *Queues) ensureQueue(ctx context.Context, name, deadLetterARN string) (s
 	if urlOutput.QueueUrl == nil {
 		return "", "", fmt.Errorf("SQS queue %q returned no URL", name)
 	}
+	normalizedURL, err := normalizeQueueURL(aws.ToString(urlOutput.QueueUrl), q.cfg.Endpoint)
+	if err != nil {
+		return "", "", fmt.Errorf("normalize SQS queue %q URL: %w", name, err)
+	}
+	urlOutput.QueueUrl = aws.String(normalizedURL)
 	if q.cfg.CreateQueues {
 		desiredAttributes := map[string]string{"VisibilityTimeout": fmt.Sprint(q.cfg.Visibility)}
 		if deadLetterARN != "" {
@@ -138,6 +149,29 @@ func (q *Queues) ensureQueue(ctx context.Context, name, deadLetterARN string) (s
 		return "", "", err
 	}
 	return aws.ToString(urlOutput.QueueUrl), attributes.Attributes[string(types.QueueAttributeNameQueueArn)], nil
+}
+
+func normalizeQueueURL(queueURL, endpoint string) (string, error) {
+	if endpoint == "" {
+		return queueURL, nil
+	}
+	parsedQueueURL, err := url.Parse(queueURL)
+	if err != nil {
+		return "", err
+	}
+	parsedEndpoint, err := url.Parse(endpoint)
+	if err != nil {
+		return "", err
+	}
+	if parsedQueueURL.Scheme == "" || parsedQueueURL.Host == "" {
+		return "", fmt.Errorf("queue URL must be absolute")
+	}
+	if parsedEndpoint.Scheme == "" || parsedEndpoint.Host == "" {
+		return "", fmt.Errorf("endpoint must be absolute")
+	}
+	parsedQueueURL.Scheme = parsedEndpoint.Scheme
+	parsedQueueURL.Host = parsedEndpoint.Host
+	return parsedQueueURL.String(), nil
 }
 
 func (q *Queues) Check(ctx context.Context) error {

@@ -89,10 +89,18 @@ Referência ausente ou ainda pendente produz `PENDING_REFERENCE`, evento própri
 
 ## Inbox, SQS e DLQ
 
-O AWS SDK usa a API real do SQS. `AWS_ENDPOINT_URL` permite apontar para LocalStack ou MiniStack local; nenhuma simulação em memória substitui o broker. Na inicialização, o serviço cria ou resolve:
+O AWS SDK usa a API real do SQS. `AWS_ENDPOINT_URL` permite apontar para um emulador compatível; nenhuma simulação em memória substitui o broker. No Compose e nos E2E, usamos MiniStack com `AUTH=true`: ele permite aplicar IAM sem depender de credencial ou licença externa. Antes de liberar as APIs, o bootstrap provisiona:
 
 - `wager-transactions.fifo` e `wager-transactions-dlq.fifo`;
-- `wager-events.fifo` e `wager-events-dlq.fifo`.
+- `wager-events.fifo` e `wager-events-dlq.fifo`;
+- redrive e visibility timeout nas filas principais;
+- usuários IAM e políticas de menor privilégio.
+
+A aplicação não é root nem usa as credenciais administrativas do emulador. Sua identidade pode resolver filas, consultar atributos, receber, confirmar, ajustar visibilidade e publicar mensagens, mas não pode criar/deletar filas, alterar atributos, listar filas ou administrar IAM. A criação/alteração de filas fica no bootstrap. Publisher de provider, consumidor de eventos e harness de testes usam identidades distintas; um quinto usuário não possui permissão alguma e valida o caminho `AccessDeniedException` em integração. As chaves são geradas pelo bootstrap, persistidas em volumes Docker separados e montadas como profile AWS apenas no respectivo consumidor. Nenhuma credencial é registrada em logs ou versionada.
+
+MiniStack 1.5 aplica o conjunto de ações SQS por identidade, mas não compara o ARN da fila no avaliador IAM; as policies usam `Resource: "*"` e reduzem privilégio por ação. A validação de domínio ainda mantém a separação entre as filas de entrada e de eventos, e o requisito de credenciais e policy no broker fica executável sem licença externa. Em AWS real ou LocalStack licenciado, essa matriz deve restringir cada ação aos quatro ARNs de fila.
+
+Somente no Compose local, `SQS_DISABLE_MESSAGE_CHECKSUM_VALIDATION=true` contorna uma divergência do MiniStack no reenvio FIFO deduplicado: ele devolve o MD5 do primeiro corpo, embora o PostgreSQL possa ter normalizado a ordem das chaves JSON para o retry. O padrão é `false` e ambientes AWS SQS devem preservá-lo.
 
 As filas principais recebem redrive após cinco recebimentos e visibility timeout de 30 segundos. Entradas bem-sucedidas e rejeições de negócio duráveis são removidas somente depois do commit. Entradas inválidas e falhas permanentes não são removidas, chegando à DLQ pelo redrive. Falhas transitórias também permanecem para retry.
 
@@ -106,7 +114,7 @@ Todo evento externo nasce na mesma transação de banco que seu fato. Publishers
 
 Eventos de saída usam `MessageGroupId=aggregateId` e `MessageDeduplicationId=eventId`. Se o processo cair depois do publish e antes de marcar a outbox, o mesmo `eventId` será republicado; consumidores devem ser idempotentes. Essa é entrega at-least-once, sem falsa promessa de exactly-once distribuído.
 
-Na entrada, a aplicação lê `ApproximateReceiveCount` e calcula backoff exponencial limitado para erros transitórios. Erros permanentes recebem visibilidade zero para alcançarem rapidamente o redrive configurado. Um heartbeat estende a visibilidade durante o caso de uso; cancelamento por shutdown libera a mensagem. A criação das filas é idempotente e os atributos mutáveis de visibilidade e redrive são reconciliados em cada inicialização quando `SQS_CREATE_QUEUES=true`.
+Na entrada, a aplicação lê `ApproximateReceiveCount` e calcula backoff exponencial limitado para erros transitórios. Erros permanentes recebem visibilidade zero para alcançarem rapidamente o redrive configurado. Um heartbeat estende a visibilidade durante o caso de uso; cancelamento por shutdown libera a mensagem. O bootstrap reconcilia idempotentemente filas, redrive e credenciais antes das APIs. `SQS_CREATE_QUEUES=false` no Compose, pois uma identidade de runtime não pode administrar infraestrutura.
 
 ## Eventos
 
@@ -140,21 +148,21 @@ O serviço `migrate` do Docker Compose executa `golang-migrate` antes das APIs. 
 
 ## Ambiente local
 
-O `compose.yaml` inicia PostgreSQL da aplicação, PostgreSQL isolado do IdP, Keycloak com import automático do realm, LocalStack limitado a SQS e três instâncias da API. A imagem da aplicação é multi-stage, contém somente os binários e certificados necessários e executa com usuário sem privilégios. Volumes nomeados preservam banco, identidade e filas entre reinícios.
+O `compose.yaml` inicia PostgreSQL da aplicação, PostgreSQL isolado do IdP, Keycloak com import automático do realm, MiniStack com SQS/IAM aplicado e três instâncias da API. A imagem da aplicação é multi-stage, contém somente os binários e certificados necessários e executa com usuário sem privilégios. Volumes nomeados preservam banco, identidade, filas e credenciais locais entre reinícios.
 
 ## Execução para avaliação
 
-Execute `docker compose up --build -d`. O `.env` está versionado intencionalmente com valores públicos deste desafio para não exigir setup adicional; ele contém apenas credenciais locais de Keycloak e LocalStack, nunca segredos de produção. O serviço `migrate` aplica as migrations antes de liberar as três APIs. Em uma instalação nova, o banco de domínio começa sem seed: carteiras, transações, ledger, inbox e outbox estão vazios. O import automático do Keycloak cria somente os clients OAuth locais necessários para autenticar a avaliação; não cria dados de negócio.
+Execute `docker compose up --build -d`. O `.env` está versionado intencionalmente com valores públicos deste desafio para não exigir setup adicional; ele contém configuração local do Keycloak e das portas, nunca segredos de produção. O broker gera as chaves IAM no próprio volume durante o bootstrap. O serviço `migrate` aplica as migrations antes de liberar as três APIs. Em uma instalação nova, o banco de domínio começa sem seed: carteiras, transações, ledger, inbox e outbox estão vazios. O import automático do Keycloak cria somente os clients OAuth locais necessários para autenticar a avaliação; não cria dados de negócio.
 
 Valide `GET http://localhost:8080/health/ready` antes de enviar operações financeiras. Com o ambiente pronto, `8080` disponibiliza Swagger e `api-1`; `8082` e `8083` disponibilizam `api-2` e `api-3`. As instâncias têm memória e pools próprios, mas compartilham PostgreSQL e filas. Portanto, uma carteira pode ser criada em `api-1`, movimentada em `api-2` e consultada em `api-3`, sem depender de estado em memória de uma única instância.
 
 Para o fluxo manual, use a identidade interna para criar/consultar carteiras e um client de provider para operações de aposta. O `README.md` contém os clients locais, chamadas HTTP portáveis, migrations, os resultados esperados e o procedimento para zerar apenas os volumes do Compose.
 
-Os E2E não usam esse Compose. A tag `integration` cria via Testcontainers um PostgreSQL vazio, Keycloak, LocalStack e três APIs efêmeras, sem reutilizar volumes, filas ou dados manuais. `docker compose down` apenas para os containers do ambiente manual; `docker compose down -v` também apaga seus volumes locais e deve ser usado somente para reiniciar esse ambiente do zero.
+Os E2E não usam esse Compose. A tag `integration` cria via Testcontainers um PostgreSQL vazio, Keycloak, MiniStack com IAM e três APIs efêmeras, sem reutilizar volumes, filas ou dados manuais. `docker compose down` apenas para os containers do ambiente manual; `docker compose down -v` também apaga seus volumes locais e deve ser usado somente para reiniciar esse ambiente do zero.
 
 ## Estratégia de testes
 
-Os testes unitários exercitam o domínio puro, hash/cursor da aplicação, retry da mensageria, métricas e o grafo Fx. A build tag `integration` sobe uma rede isolada por Testcontainers com PostgreSQL, LocalStack, Keycloak e três containers independentes da API; não reutiliza os containers, filas, banco ou volumes do Compose manual. Antes dos cenários, as migrations do `golang-migrate` são aplicadas em um PostgreSQL novo e o teste confirma que wallets, transações, ledger, inbox e outbox começam vazios. O realm importado no Keycloak é o único fixture e se limita aos clients OAuth de teste. Concorrência financeira é validada pelo estado final e pelo ledger, não por detalhes de implementação em memória. A recuperação da outbox também é exercitada no intervalo entre o `SendMessage` bem-sucedido e sua confirmação no banco: um lease abandonado é retomado por outro publisher com o mesmo `eventId` e payload imutável.
+Os testes unitários exercitam o domínio puro, hash/cursor da aplicação, retry da mensageria, métricas e o grafo Fx. A build tag `integration` sobe uma rede isolada por Testcontainers com PostgreSQL, MiniStack com IAM, Keycloak e três containers independentes da API; não reutiliza os containers, filas, banco ou volumes do Compose manual. Antes dos cenários, o bootstrap cria filas, redrive, usuários e políticas; as migrations do `golang-migrate` são aplicadas em um PostgreSQL novo e o teste confirma que wallets, transações, ledger, inbox e outbox começam vazios. O realm importado no Keycloak é o único fixture e se limita aos clients OAuth de teste. Concorrência financeira é validada pelo estado final e pelo ledger, não por detalhes de implementação em memória. A recuperação da outbox também é exercitada no intervalo entre o `SendMessage` bem-sucedido e sua confirmação no banco: um lease abandonado é retomado por outro publisher com o mesmo `eventId` e payload imutável. `TestSQSIAMPoliciesAllowOnlyTheAssignedOperations` confirma operações permitidas e rejeita publisher consumindo, consumidor publicando, usuário sem policy e aplicação tentando criar fila.
 
 O detector de corrida é executado em Linux porque o Go para Windows exige CGO e um compilador C. O `Dockerfile.test` instala GCC e pode executar a suíte contra o Docker socket; as dependências continuam sendo criadas e removidas pelo Testcontainers, sem perfil de testes do Compose. Os dois testes de recuperação que controlam o ciclo de vida dos containers usam a tag adicional `hostrecovery`, interrompendo e recriando exclusivamente as APIs efêmeras do Testcontainers; os comandos estão no `README.md`. Testes de carga continuam como diferencial opcional do enunciado.
 
@@ -165,7 +173,8 @@ A suíte foi montada a partir da seção de verificação obrigatória do desafi
 | Verificação exigida | Evidência na suíte |
 | --- | --- |
 | Dinheiro, regras da carteira, cinco operações externas e idempotência | Testes unitários de domínio e aplicação validam escala, limites, transições, conflitos de payload e reprodução do resultado. |
-| Infraestrutura real e lifecycle | `integration` inicia PostgreSQL, Keycloak e LocalStack reais, aplica migrations, confirma banco vazio e executa o lifecycle Fx. |
+| Infraestrutura real e lifecycle | `integration` inicia PostgreSQL, Keycloak e MiniStack reais, aplica migrations, confirma banco vazio e executa o lifecycle Fx. |
+| Credenciais e políticas do broker | `TestSQSIAMPoliciesAllowOnlyTheAssignedOperations` usa identidades SQS distintas e prova permissões permitidas e `AccessDeniedException` para cada acesso proibido. |
 | OAuth e isolamento | Os testes obtêm tokens reais do Keycloak para os providers A, B e C; validam autorização interna, rejeição de acesso cruzado e ausência de efeito financeiro em tentativas bloqueadas. |
 | Três instâncias e concorrência | Os cenários usam três APIs independentes e verificam repetição idempotente, disputa de apostas sobre o mesmo saldo e avanço paralelo de carteiras distintas. |
 | Inbox, SQS, DLQ e recuperação | Há cobertura de deduplicação entre HTTP e SQS, mensagem inválida na DLQ, queda controlada depois do commit e antes do delete, além de reentrega segura. |

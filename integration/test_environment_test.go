@@ -4,8 +4,10 @@ package integration_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -19,15 +21,20 @@ import (
 )
 
 const (
-	postgresImage   = "postgres:17.11-alpine"
-	localstackImage = "localstack/localstack:4.8.1"
-	keycloakImage   = "quay.io/keycloak/keycloak:26.7.3"
+	postgresImage  = "postgres:17.11-alpine"
+	ministackImage = "ministackorg/ministack:1.5.0"
+	keycloakImage  = "quay.io/keycloak/keycloak:26.7.3"
 
-	postgresAlias   = "postgres"
-	localstackAlias = "localstack"
-	keycloakAlias   = "keycloak"
-	internalIssuer  = "http://keycloak:8080/realms/gaming"
+	postgresAlias  = "postgres"
+	ministackAlias = "ministack"
+	keycloakAlias  = "keycloak"
+	internalIssuer = "http://keycloak:8080/realms/gaming"
 )
+
+type sqsCredential struct {
+	AccessKeyID     string `json:"accessKeyId"`
+	SecretAccessKey string `json:"secretAccessKey"`
+}
 
 type e2eEnvironment struct {
 	root                string
@@ -39,10 +46,11 @@ type e2eEnvironment struct {
 	imageClient         *testcontainers.DockerProvider
 	emptyDomainDatabase bool
 
-	databaseURL string
-	keycloakURL string
-	sqsEndpoint string
-	apiURLs     []string
+	databaseURL    string
+	keycloakURL    string
+	sqsEndpoint    string
+	sqsCredentials map[string]sqsCredential
+	apiURLs        []string
 }
 
 var testEnvironment *e2eEnvironment
@@ -102,7 +110,7 @@ func startE2EEnvironment(ctx context.Context) (*e2eEnvironment, error) {
 		environment.close(context.Background())
 		return nil, err
 	}
-	if err := environment.startLocalStack(ctx); err != nil {
+	if err := environment.startMiniStack(ctx); err != nil {
 		environment.close(context.Background())
 		return nil, err
 	}
@@ -204,32 +212,90 @@ func (e *e2eEnvironment) assertEmptyDomainDatabase(ctx context.Context) error {
 	return nil
 }
 
-func (e *e2eEnvironment) startLocalStack(ctx context.Context) error {
+func (e *e2eEnvironment) startMiniStack(ctx context.Context) error {
+	bootstrapDir := filepath.Join(e.root, "scripts", "aws-emulator")
+	credentialsPath := "/tmp/jungle-gaming-sqs-credentials.json"
 	container, err := e.run(ctx, testcontainers.ContainerRequest{
-		Image: localstackImage,
+		Image: ministackImage,
 		Env: map[string]string{
-			"SERVICES":           "sqs",
-			"AWS_DEFAULT_REGION": "us-east-1",
-			"PERSISTENCE":        "0",
+			"AUTH":                         "true",
+			"AWS_DEFAULT_REGION":           "us-east-1",
+			"AWS_ACCESS_KEY_ID":            "test",
+			"AWS_SECRET_ACCESS_KEY":        "test",
+			"PERSIST_STATE":                "0",
+			"SQS_APP_CREDENTIALS_PATH":     "/tmp/jungle-gaming-app-credentials",
+			"SQS_TOOLING_CREDENTIALS_PATH": "/tmp/jungle-gaming-tooling-credentials",
+			"SQS_IAM_READY_PATH":           "/tmp/jungle-gaming-sqs-iam-ready",
+			"SQS_CREDENTIALS_JSON_PATH":    credentialsPath,
+		},
+		Files: []testcontainers.ContainerFile{
+			{
+				HostFilePath:      filepath.Join(bootstrapDir, "00-clear-ready.sh"),
+				ContainerFilePath: "/docker-entrypoint-initaws.d/00-clear-ready.sh",
+				FileMode:          0o755,
+			},
+			{
+				HostFilePath:      filepath.Join(bootstrapDir, "10-bootstrap.py"),
+				ContainerFilePath: "/docker-entrypoint-initaws.d/ready.d/10-bootstrap.py",
+				FileMode:          0o755,
+			},
 		},
 		ExposedPorts: []string{"4566/tcp"},
 		Networks:     []string{e.networkName},
 		NetworkAliases: map[string][]string{
-			e.networkName: {localstackAlias},
+			e.networkName: {ministackAlias},
 		},
-		WaitingFor: wait.ForHTTP("/_localstack/health").
+		WaitingFor: wait.ForHTTP("/_ministack/health").
 			WithPort("4566/tcp").
 			WithStartupTimeout(90 * time.Second),
 	})
 	if err != nil {
-		return fmt.Errorf("start LocalStack test container: %w", err)
+		return fmt.Errorf("start MiniStack test container: %w", err)
 	}
 	endpoint, err := container.PortEndpoint(ctx, "4566/tcp", "http")
 	if err != nil {
-		return fmt.Errorf("resolve LocalStack test endpoint: %w", err)
+		return fmt.Errorf("resolve MiniStack test endpoint: %w", err)
 	}
 	e.sqsEndpoint = endpoint
-	return nil
+	return e.loadSQSCredentials(ctx, container, credentialsPath)
+}
+
+func (e *e2eEnvironment) loadSQSCredentials(
+	ctx context.Context,
+	container testcontainers.Container,
+	path string,
+) error {
+	deadline := time.Now().Add(30 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		reader, err := container.CopyFileFromContainer(ctx, path)
+		if err != nil {
+			lastErr = err
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+		contents, readErr := io.ReadAll(reader)
+		closeErr := reader.Close()
+		if readErr != nil {
+			return fmt.Errorf("read MiniStack credentials: %w", readErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("close MiniStack credentials: %w", closeErr)
+		}
+		credentials := make(map[string]sqsCredential)
+		if err := json.Unmarshal(contents, &credentials); err != nil {
+			return fmt.Errorf("decode MiniStack credentials: %w", err)
+		}
+		for _, profile := range []string{"application", "provider-publisher", "event-consumer", "test-harness", "denied"} {
+			credential := credentials[profile]
+			if credential.AccessKeyID == "" || credential.SecretAccessKey == "" {
+				return fmt.Errorf("MiniStack credential profile %q is incomplete", profile)
+			}
+		}
+		e.sqsCredentials = credentials
+		return nil
+	}
+	return fmt.Errorf("wait for MiniStack IAM bootstrap: %w", lastErr)
 }
 
 func (e *e2eEnvironment) startKeycloak(ctx context.Context) error {
@@ -316,44 +382,45 @@ func (e *e2eEnvironment) replaceAPIs(ctx context.Context, count int, overrides m
 
 func (e *e2eEnvironment) startAPI(ctx context.Context, index int, overrides map[string]string) (testcontainers.Container, string, error) {
 	env := map[string]string{
-		"HTTP_ADDRESS":                   ":8080",
-		"DATABASE_URL":                   "postgres://postgres:postgres@postgres:5432/wagering?sslmode=disable",
-		"DATABASE_MAX_CONNECTIONS":       "12",
-		"OIDC_ISSUER_URL":                internalIssuer,
-		"OIDC_DISCOVERY_URL":             internalIssuer,
-		"OIDC_AUDIENCE":                  "wagering-api",
-		"OIDC_PROVIDER_CLAIM":            "provider_id",
-		"OIDC_INTERNAL_ROLE":             "wallet-service",
-		"OIDC_STARTUP_TIMEOUT":           "30s",
-		"AWS_REGION":                     "us-east-1",
-		"AWS_ENDPOINT_URL":               "http://localstack:4566",
-		"AWS_ACCESS_KEY_ID":              "test",
-		"AWS_SECRET_ACCESS_KEY":          "test",
-		"SQS_INPUT_QUEUE":                "wager-transactions.fifo",
-		"SQS_INPUT_DLQ":                  "wager-transactions-dlq.fifo",
-		"SQS_EVENT_QUEUE":                "wager-events.fifo",
-		"SQS_EVENT_DLQ":                  "wager-events-dlq.fifo",
-		"SQS_CREATE_QUEUES":              "true",
-		"SQS_MAX_RECEIVES":               "5",
-		"SQS_VISIBILITY_TIMEOUT_SECONDS": "30",
-		"SQS_RETRY_BASE_BACKOFF":         "2s",
-		"SQS_RETRY_MAX_BACKOFF":          "2m",
-		"WORKERS_ENABLED":                "true",
-		"SQS_CONSUMER_CONCURRENCY":       "2",
-		"OUTBOX_BATCH_SIZE":              "50",
-		"REFERENCE_BATCH_SIZE":           "50",
-		"REFERENCE_MAX_ATTEMPTS":         "10",
-		"REFERENCE_BASE_BACKOFF":         "2s",
-		"REFERENCE_MAX_BACKOFF":          "5m",
-		"OUTBOX_LEASE":                   "30s",
-		"WORKER_POLL_INTERVAL":           "200ms",
-		"OTEL_TRACING_ENABLED":           "false",
-		"OTEL_SERVICE_NAME":              "jungle-gaming-api",
-		"OTEL_SERVICE_VERSION":           "e2e-test",
-		"OTEL_DEPLOYMENT_ENVIRONMENT":    "testcontainers",
-		"OTEL_EXPORTER_OTLP_ENDPOINT":    "localhost:4317",
-		"OTEL_EXPORTER_OTLP_INSECURE":    "true",
-		"OTEL_TRACES_SAMPLE_RATIO":       "0",
+		"HTTP_ADDRESS":                            ":8080",
+		"DATABASE_URL":                            "postgres://postgres:postgres@postgres:5432/wagering?sslmode=disable",
+		"DATABASE_MAX_CONNECTIONS":                "12",
+		"OIDC_ISSUER_URL":                         internalIssuer,
+		"OIDC_DISCOVERY_URL":                      internalIssuer,
+		"OIDC_AUDIENCE":                           "wagering-api",
+		"OIDC_PROVIDER_CLAIM":                     "provider_id",
+		"OIDC_INTERNAL_ROLE":                      "wallet-service",
+		"OIDC_STARTUP_TIMEOUT":                    "30s",
+		"AWS_REGION":                              "us-east-1",
+		"AWS_ENDPOINT_URL":                        "http://ministack:4566",
+		"AWS_ACCESS_KEY_ID":                       e.sqsCredentials["application"].AccessKeyID,
+		"AWS_SECRET_ACCESS_KEY":                   e.sqsCredentials["application"].SecretAccessKey,
+		"SQS_INPUT_QUEUE":                         "wager-transactions.fifo",
+		"SQS_INPUT_DLQ":                           "wager-transactions-dlq.fifo",
+		"SQS_EVENT_QUEUE":                         "wager-events.fifo",
+		"SQS_EVENT_DLQ":                           "wager-events-dlq.fifo",
+		"SQS_CREATE_QUEUES":                       "false",
+		"SQS_DISABLE_MESSAGE_CHECKSUM_VALIDATION": "true",
+		"SQS_MAX_RECEIVES":                        "5",
+		"SQS_VISIBILITY_TIMEOUT_SECONDS":          "30",
+		"SQS_RETRY_BASE_BACKOFF":                  "2s",
+		"SQS_RETRY_MAX_BACKOFF":                   "2m",
+		"WORKERS_ENABLED":                         "true",
+		"SQS_CONSUMER_CONCURRENCY":                "2",
+		"OUTBOX_BATCH_SIZE":                       "50",
+		"REFERENCE_BATCH_SIZE":                    "50",
+		"REFERENCE_MAX_ATTEMPTS":                  "10",
+		"REFERENCE_BASE_BACKOFF":                  "2s",
+		"REFERENCE_MAX_BACKOFF":                   "5m",
+		"OUTBOX_LEASE":                            "30s",
+		"WORKER_POLL_INTERVAL":                    "200ms",
+		"OTEL_TRACING_ENABLED":                    "false",
+		"OTEL_SERVICE_NAME":                       "jungle-gaming-api",
+		"OTEL_SERVICE_VERSION":                    "e2e-test",
+		"OTEL_DEPLOYMENT_ENVIRONMENT":             "testcontainers",
+		"OTEL_EXPORTER_OTLP_ENDPOINT":             "localhost:4317",
+		"OTEL_EXPORTER_OTLP_INSECURE":             "true",
+		"OTEL_TRACES_SAMPLE_RATIO":                "0",
 	}
 	for key, value := range overrides {
 		env[key] = value

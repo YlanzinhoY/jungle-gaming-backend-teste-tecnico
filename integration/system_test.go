@@ -25,6 +25,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
+	"github.com/aws/smithy-go"
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
@@ -513,11 +514,15 @@ func TestOutboundEventsMatchDocumentedContract(t *testing.T) {
 }
 
 func TestFxLifecycleAgainstRealDependencies(t *testing.T) {
+	applicationCredentials := testEnvironment.sqsCredentials["application"]
 	t.Setenv("HTTP_ADDRESS", "127.0.0.1:0")
 	t.Setenv("DATABASE_URL", postgresURL)
 	t.Setenv("OIDC_ISSUER_URL", oidcIssuerURL)
 	t.Setenv("OIDC_DISCOVERY_URL", keycloakURL+"/realms/gaming")
 	t.Setenv("AWS_ENDPOINT_URL", sqsEndpoint)
+	t.Setenv("AWS_ACCESS_KEY_ID", applicationCredentials.AccessKeyID)
+	t.Setenv("AWS_SECRET_ACCESS_KEY", applicationCredentials.SecretAccessKey)
+	t.Setenv("SQS_CREATE_QUEUES", "false")
 	t.Setenv("WORKERS_ENABLED", "true")
 	t.Setenv("SQS_CONSUMER_CONCURRENCY", "1")
 	t.Setenv("OTEL_TRACING_ENABLED", "false")
@@ -1097,6 +1102,80 @@ func TestHTTPAndSQSDeduplicateTheSameOperation(t *testing.T) {
 	client.assertLedgerEntries(t, wallet.ID, 2)
 }
 
+func TestSQSIAMPoliciesAllowOnlyTheAssignedOperations(t *testing.T) {
+	harness := newSQSClient(t)
+	application := newSQSClientForProfile(t, "application")
+	providerPublisher := newSQSClientForProfile(t, "provider-publisher")
+	eventConsumer := newSQSClientForProfile(t, "event-consumer")
+	denied := newSQSClientForProfile(t, "denied")
+
+	inputURL := queueURL(t, harness, "wager-transactions.fifo")
+	eventURL := queueURL(t, harness, "wager-events.fifo")
+	drainQueue(t, harness, eventURL)
+	t.Cleanup(func() { drainQueue(t, harness, eventURL) })
+
+	marker := "iam-policy-" + uuid.NewString()
+	if _, err := application.SendMessage(context.Background(), &sqs.SendMessageInput{
+		QueueUrl:               aws.String(eventURL),
+		MessageBody:            aws.String(marker),
+		MessageGroupId:         aws.String(marker),
+		MessageDeduplicationId: aws.String(marker),
+	}); err != nil {
+		t.Fatalf("application must publish to the event queue: %v", err)
+	}
+	if _, err := providerPublisher.GetQueueUrl(context.Background(), &sqs.GetQueueUrlInput{
+		QueueName: aws.String("wager-transactions.fifo"),
+	}); err != nil {
+		t.Fatalf("provider publisher must resolve the input queue: %v", err)
+	}
+	if _, err := eventConsumer.GetQueueAttributes(context.Background(), &sqs.GetQueueAttributesInput{
+		QueueUrl:       aws.String(eventURL),
+		AttributeNames: []types.QueueAttributeName{types.QueueAttributeNameQueueArn},
+	}); err != nil {
+		t.Fatalf("event consumer must inspect the event queue: %v", err)
+	}
+
+	assertSQSAccessDenied(t, func() error {
+		_, err := providerPublisher.ReceiveMessage(context.Background(), &sqs.ReceiveMessageInput{
+			QueueUrl: aws.String(inputURL),
+		})
+		return err
+	})
+	assertSQSAccessDenied(t, func() error {
+		_, err := eventConsumer.SendMessage(context.Background(), &sqs.SendMessageInput{
+			QueueUrl:               aws.String(eventURL),
+			MessageBody:            aws.String(marker + "-forbidden"),
+			MessageGroupId:         aws.String(marker),
+			MessageDeduplicationId: aws.String(marker + "-forbidden"),
+		})
+		return err
+	})
+	assertSQSAccessDenied(t, func() error {
+		_, err := denied.GetQueueUrl(context.Background(), &sqs.GetQueueUrlInput{
+			QueueName: aws.String("wager-events.fifo"),
+		})
+		return err
+	})
+	assertSQSAccessDenied(t, func() error {
+		_, err := application.CreateQueue(context.Background(), &sqs.CreateQueueInput{
+			QueueName: aws.String("forbidden-" + uuid.NewString()),
+		})
+		return err
+	})
+}
+
+func assertSQSAccessDenied(t *testing.T, operation func() error) {
+	t.Helper()
+	err := operation()
+	if err == nil {
+		t.Fatal("SQS operation unexpectedly succeeded")
+	}
+	var apiError smithy.APIError
+	if !errors.As(err, &apiError) || apiError.ErrorCode() != "AccessDeniedException" {
+		t.Fatalf("SQS operation error = %v, want AccessDeniedException", err)
+	}
+}
+
 func TestInvalidSQSMessageReachesDLQ(t *testing.T) {
 	sqsClient := newSQSClient(t)
 	inputURL := queueURL(t, sqsClient, "wager-transactions.fifo")
@@ -1399,13 +1478,20 @@ func TestOutboxRecoversAfterPublishBeforeConfirmation(t *testing.T) {
 	waitFor(t, 20*time.Second, func() (bool, error) {
 		var published bool
 		var storedPayload []byte
+		var attempts int
+		var lastError, lockedBy string
+		var locked bool
 		err := pool.QueryRow(
 			context.Background(),
-			`SELECT published_at IS NOT NULL, payload FROM outbox_events WHERE event_id=$1`,
+			`SELECT published_at IS NOT NULL, payload, attempts, COALESCE(last_error, ''), COALESCE(locked_by, ''), locked_until IS NOT NULL
+			 FROM outbox_events WHERE event_id=$1`,
 			eventID,
-		).Scan(&published, &storedPayload)
-		if err != nil || !published {
+		).Scan(&published, &storedPayload, &attempts, &lastError, &lockedBy, &locked)
+		if err != nil {
 			return false, err
+		}
+		if !published {
+			return false, fmt.Errorf("outbox event is still unpublished: attempts=%d locked=%t locked_by=%q last_error=%q", attempts, locked, lockedBy, lastError)
 		}
 		var stored, original any
 		if err := json.Unmarshal(storedPayload, &stored); err != nil {
@@ -1709,11 +1795,23 @@ func assertProblemCode(t *testing.T, body []byte, want string) {
 }
 
 func newSQSClient(t *testing.T) *sqs.Client {
+	return newSQSClientForProfile(t, "test-harness")
+}
+
+func newSQSClientForProfile(t *testing.T, profile string) *sqs.Client {
 	t.Helper()
+	credential, ok := testEnvironment.sqsCredentials[profile]
+	if !ok {
+		t.Fatalf("SQS credential profile %q is unavailable", profile)
+	}
 	configuration, err := awsconfig.LoadDefaultConfig(
 		context.Background(),
 		awsconfig.WithRegion("us-east-1"),
-		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("test", "test", "")),
+		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
+			credential.AccessKeyID,
+			credential.SecretAccessKey,
+			"",
+		)),
 	)
 	if err != nil {
 		t.Fatalf("load AWS config: %v", err)
@@ -1731,7 +1829,17 @@ func queueURL(t *testing.T, client *sqs.Client, name string) string {
 	if err != nil {
 		t.Fatalf("get queue %s: %v", name, err)
 	}
-	return aws.ToString(output.QueueUrl)
+	queue, err := url.Parse(aws.ToString(output.QueueUrl))
+	if err != nil {
+		t.Fatalf("parse queue %s URL: %v", name, err)
+	}
+	endpoint, err := url.Parse(sqsEndpoint)
+	if err != nil {
+		t.Fatalf("parse SQS endpoint: %v", err)
+	}
+	queue.Scheme = endpoint.Scheme
+	queue.Host = endpoint.Host
+	return queue.String()
 }
 
 func drainQueue(t *testing.T, client *sqs.Client, url string) {

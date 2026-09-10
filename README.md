@@ -13,8 +13,9 @@ Há dois jeitos intencionalmente separados de conhecer o sistema:
 - a **bateria E2E** usa Testcontainers e cria tudo do zero para cada execução. Ela não aproveita o banco, as filas, os volumes nem as APIs do Compose.
 
 O `.env` é propositalmente público e versionado neste desafio. Ele contém apenas
-credenciais locais de Keycloak e LocalStack, usadas para reduzir o tempo de setup
-na avaliação; não há segredos de produção nele. `.env.example` é a referência dos
+configuração local do Keycloak e das portas, usada para reduzir o tempo de setup
+na avaliação; não há segredos de produção nele. As credenciais SQS são criadas no
+startup pelo broker e não são versionadas. `.env.example` é a referência dos
 mesmos valores. Para usar outras portas ou valores locais, ajuste o `.env` na sua
 máquina sem adicionar credenciais reais ao repositório. Em seguida:
 
@@ -93,8 +94,9 @@ E2E.
 
 ## Acesso local pronto para uso
 
-Estes valores são intencionalmente públicos e existem somente para facilitar a
-avaliação local. Não há IAM nem segredo de produção neste projeto.
+As credenciais OAuth abaixo são públicas apenas para a avaliação local. O acesso
+SQS, em contraste, usa identidades IAM efêmeras de menor privilégio, criadas pelo
+bootstrap do broker e montadas somente nos containers autorizados.
 
 | Serviço | Endereço | Credencial |
 | --- | --- | --- |
@@ -108,7 +110,7 @@ avaliação local. Não há IAM nem segredo de produção neste projeto.
 | Provider B service-to-service | client `provider-b` | secret `provider-b-local-secret` |
 | Provider C service-to-service | client `provider-c` | secret `provider-c-local-secret` |
 | Carteiras service-to-service | client `wallet-service` | secret `wallet-service-local-secret` |
-| LocalStack SQS | http://localhost:4566 | access key `test`; secret `test`; região `us-east-1` |
+| MiniStack SQS | http://localhost:4566 | IAM com `AUTH=true`; as credenciais não são expostas no host. |
 
 No modal **Available authorizations** do Swagger, preencha os campos desta forma:
 
@@ -122,6 +124,48 @@ No modal **Available authorizations** do Swagger, preencha os campos desta forma
 Esses clients do Swagger são públicos e usam Authorization Code com PKCE;
 por isso, não informe `client_secret`. Depois de preencher o `client_id`, clique
 em **Authorize** e use o login indicado na tabela.
+
+### SQS com IAM local
+
+O requisito de controle da mensageria é aplicado pelo MiniStack, uma das opções
+aceitas pelo enunciado. O bootstrap cria as quatro filas FIFO, as DLQs, o redrive e
+as identidades abaixo antes de qualquer API iniciar:
+
+| Identidade | Permissões concedidas |
+| --- | --- |
+| `jungle-gaming-application` | Resolve filas, consulta atributos, recebe/remove/estende visibilidade e publica mensagens; não pode administrar a infraestrutura. |
+| `jungle-gaming-provider-publisher` | Apenas resolve e publica mensagens. |
+| `jungle-gaming-event-consumer` | Apenas resolve, consulta atributos, recebe/remove e estende visibilidade. |
+| `jungle-gaming-test-harness` | Acesso às quatro filas, exclusivamente na suíte E2E. |
+| `jungle-gaming-denied` | Nenhuma permissão SQS; existe para provar a negação no E2E. |
+
+As chaves são geradas pelo broker e ficam em volumes Docker separados. O processo
+da API recebe somente o profile `application`; não pode criar/deletar filas,
+alterar atributos, listar filas ou administrar IAM. `SQS_CREATE_QUEUES` fica
+`false` para que a aplicação restrita não tente alterar a infraestrutura.
+
+O MiniStack 1.5 aplica o conjunto de ações por identidade, mas ainda não compara
+ARN de fila no avaliador IAM. Por isso as policies usam `Resource: "*"` e reduzem
+o privilégio por ação; a separação de propósito das filas continua protegida pela
+validação de domínio do consumidor, como pede o enunciado. Em AWS real ou
+LocalStack licenciado, a mesma matriz deve ser refinada para os ARNs individuais
+das quatro filas.
+
+O Compose local também define `SQS_DISABLE_MESSAGE_CHECKSUM_VALIDATION=true`.
+É uma compatibilidade restrita ao MiniStack: no reenvio FIFO deduplicado ele
+retorna o MD5 do primeiro corpo, enquanto o banco pode normalizar a ordem das
+chaves JSON. A validação permanece `false` por padrão e deve continuar assim em
+AWS SQS.
+
+Para testar manualmente uma identidade de integração sem revelar chaves, use o
+container de ferramentas. Este comando publica na fila de entrada usando o profile
+de publisher; trocar o profile por `denied` retorna `AccessDeniedException`.
+
+```sh
+docker compose --profile tools run --rm \
+  -e AWS_PROFILE=provider-publisher \
+  sqs-cli sqs get-queue-url --queue-name wager-transactions.fifo
+```
 
 ## Exemplos por rota no Swagger
 
@@ -404,7 +448,8 @@ saldo sem o ledger é rejeitada pelo próprio PostgreSQL.
 ## E2E isolado com Testcontainers
 
 Os testes com a tag `integration` não usam os serviços do Compose. O `TestMain`
-cria uma rede privada e efêmera com Testcontainers, PostgreSQL novo, LocalStack,
+cria uma rede privada e efêmera com Testcontainers, PostgreSQL novo, MiniStack com
+IAM aplicado,
 Keycloak e três processos da API em containers independentes. Aplica as migrations
 em um banco de teste vazio e confere que não há dados de domínio antes do primeiro
 cenário. O único fixture é o realm do Keycloak, limitado aos clients OAuth usados
@@ -467,7 +512,7 @@ docker compose down
 
 `go test -count=1 ./...` é a verificação rápida do código sem dependências
 externas. A execução com Testcontainers é a validação de sistema: ela chama as
-APIs reais, obtém tokens reais do Keycloak, usa SQS real do LocalStack e aplica
+APIs reais, obtém tokens reais do Keycloak, usa SQS real do MiniStack com IAM e aplica
 migrations em um PostgreSQL vazio. Rode a versão Linux com `-race` antes de uma
 entrega; ela também inclui os cenários que reiniciam containers durante o fluxo.
 
